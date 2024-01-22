@@ -1,0 +1,18 @@
+import { HorizontalBox } from "std-widgets.slint";
+import { SideBar } from "side-bar.slint";
+import { EntriesPage, EntriesStore, EntryRow } from "entries-page.slint";
+
+export { EntriesStore, EntryRow }
+
+export component MainWindow inherits Window {
+    title: "Monies!";
+
+    HorizontalLayout {
+        side-bar := SideBar {
+//            title: "How do I hide this label?";
+            model: ["Entries", "Summary"];
+        }
+
+        if(side-bar.current-item == 0) : EntriesPage {}
+    }
+}

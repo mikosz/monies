@@ -1,0 +1,145 @@
+import { LineEdit, ListView } from "std-widgets.slint";
+import { Page } from "page.slint";
+import { SuggestionLineEdit } from "suggestion-line-edit.slint";
+
+export struct EntryRow {
+    date: string,
+    name: string,
+    category: string,
+    amount: string,
+}
+
+export global EntriesStore {
+    in property <[EntryRow]> entries;
+    // Arguments: date, name, category, amount.
+    // Returns true when the input was valid and the entry has been added.
+    callback add-entry(string, string, string, string) -> bool;
+
+    // Suggestions for the current text of the category input.
+    in property <[string]> category-suggestions;
+    // Called with the new text whenever the category input changes.
+    callback category-edited(string);
+}
+
+export component EntriesPage inherits Page {
+    title: "Entries";
+    description: "";
+
+    // Header, rows and input share these constraints so the columns line up.
+    property <length> column-spacing: 8px;
+    property <length> date-width: 110px;
+    property <length> amount-width: 110px;
+    property <length> flexible-width: 100px;
+
+    function submit() {
+        if (EntriesStore.add-entry(date-input.text, name-input.text, category-input.text, amount-input.text)) {
+            date-input.text = "";
+            name-input.text = "";
+            category-input.text = "";
+            amount-input.text = "";
+            date-input.focus();
+        }
+    }
+
+    VerticalLayout {
+        spacing: 4px;
+
+        HorizontalLayout {
+            spacing: root.column-spacing;
+
+            Text {
+                width: root.date-width;
+                text: "Date";
+                font-weight: 700;
+            }
+            Text {
+                horizontal-stretch: 1;
+                min-width: root.flexible-width;
+                preferred-width: root.flexible-width;
+                text: "Name";
+                font-weight: 700;
+            }
+            Text {
+                horizontal-stretch: 1;
+                min-width: root.flexible-width;
+                preferred-width: root.flexible-width;
+                text: "Category";
+                font-weight: 700;
+            }
+            Text {
+                width: root.amount-width;
+                text: "Amount";
+                font-weight: 700;
+                horizontal-alignment: right;
+            }
+        }
+
+        ListView {
+            vertical-stretch: 1;
+
+            for row in EntriesStore.entries : HorizontalLayout {
+                spacing: root.column-spacing;
+                padding-top: 2px;
+                padding-bottom: 2px;
+
+                Text {
+                    width: root.date-width;
+                    text: row.date;
+                }
+                Text {
+                    horizontal-stretch: 1;
+                    min-width: root.flexible-width;
+                    preferred-width: root.flexible-width;
+                    text: row.name;
+                    overflow: elide;
+                }
+                Text {
+                    horizontal-stretch: 1;
+                    min-width: root.flexible-width;
+                    preferred-width: root.flexible-width;
+                    text: row.category;
+                    overflow: elide;
+                }
+                Text {
+                    width: root.amount-width;
+                    text: row.amount;
+                    horizontal-alignment: right;
+                }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: root.column-spacing;
+
+            date-input := LineEdit {
+                width: root.date-width;
+                placeholder-text: "YYYY-MM-DD";
+                accepted => { root.submit(); }
+            }
+            name-input := LineEdit {
+                horizontal-stretch: 1;
+                min-width: root.flexible-width;
+                preferred-width: root.flexible-width;
+                placeholder-text: "Name";
+                accepted => { root.submit(); }
+            }
+            category-input := SuggestionLineEdit {
+                horizontal-stretch: 1;
+                min-width: root.flexible-width;
+                preferred-width: root.flexible-width;
+                placeholder-text: "Category, e.g. bills.rent";
+                suggestions: EntriesStore.category-suggestions;
+                // Picking a category continues with its subcategories.
+                pick-suffix: ".";
+                edited(text) => { EntriesStore.category-edited(text); }
+                accepted => { root.submit(); }
+            }
+            amount-input := LineEdit {
+                width: root.amount-width;
+                placeholder-text: "Amount";
+                horizontal-alignment: right;
+                accepted => { root.submit(); }
+            }
+        }
+    }
+}

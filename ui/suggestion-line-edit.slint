@@ -1,0 +1,139 @@
+import { LineEdit, ListView, Palette } from "std-widgets.slint";
+
+// A LineEdit with a dropdown of suggestions shown above it while it has focus.
+// The owner supplies `suggestions` and is expected to update them in response to `edited`;
+// the widget itself doesn't know what is being suggested.
+//
+// Keys: Down/Up highlight the first/last suggestion and then move the highlight, wrapping
+// around at either end. Enter/Tab pick the highlighted suggestion, Escape removes the
+// highlight. Enter without a highlight is passed on as `accepted`.
+export component SuggestionLineEdit {
+    in property <[string]> suggestions;
+    in property <int> max-visible-suggestions: 6;
+    in property <string> placeholder-text <=> input.placeholder-text;
+    // Appended to a suggestion when it's picked, e.g. a separator to continue typing a path.
+    in property <string> pick-suffix: "";
+    in-out property <string> text <=> input.text;
+
+    // Called with the new text after the user edits it or picks a suggestion.
+    callback edited(string);
+    callback accepted(string);
+
+    // Index into `suggestions`, or -1 when nothing is highlighted.
+    property <int> highlighted: -1;
+    property <length> row-height: 24px;
+    property <bool> dropdown-open: input.has-focus && root.suggestions.length > 0;
+
+    forward-focus: input;
+
+    function pick(index: int) {
+        input.text = root.suggestions[index] + root.pick-suffix;
+        // Offsets are clamped to the text length, so this moves the cursor to the end.
+        input.set-selection-offsets(2147483647, 2147483647);
+        root.reset-highlight();
+        root.edited(input.text);
+    }
+
+    function reset-highlight() {
+        root.highlighted = -1;
+        list.content-y = 0;
+    }
+
+    function move-highlight(delta: int) {
+        let count = root.suggestions.length;
+        if (root.highlighted < 0) {
+            root.highlighted = delta > 0 ? 0 : count - 1;
+        } else {
+            root.highlighted = Math.mod(root.highlighted + delta + count, count);
+        }
+        // Keep the highlighted row within the visible part of the list.
+        if (root.highlighted >= 0) {
+            let top = root.highlighted * root.row-height;
+            if (top + list.content-y < 0) {
+                list.content-y = -top;
+            } else if (top + root.row-height + list.content-y > list.visible-height) {
+                list.content-y = list.visible-height - top - root.row-height;
+            }
+        }
+    }
+
+    VerticalLayout {
+        input := LineEdit {
+            edited(text) => {
+                root.reset-highlight();
+                root.edited(text);
+            }
+            accepted(text) => {
+                root.accepted(text);
+            }
+            key-pressed(event) => {
+                if (!root.dropdown-open) {
+                    return reject;
+                }
+                if (event.text == Key.DownArrow) {
+                    root.move-highlight(1);
+                    return accept;
+                }
+                if (event.text == Key.UpArrow) {
+                    root.move-highlight(-1);
+                    return accept;
+                }
+                if (event.text == Key.Escape) {
+                    root.reset-highlight();
+                    return accept;
+                }
+                if (root.highlighted >= 0 && (event.text == Key.Return || event.text == Key.Tab)) {
+                    root.pick(root.highlighted);
+                    return accept;
+                }
+                return reject;
+            }
+        }
+    }
+
+    // Drawn above the input so it doesn't cover the rest of the input row. It's declared after
+    // the input, so it paints over (and receives clicks before) anything earlier on the page.
+    dropdown := Rectangle {
+        visible: root.dropdown-open;
+        x: 0;
+        width: root.width;
+        height: Math.min(root.suggestions.length, root.max-visible-suggestions) * root.row-height + 2 * self.border-width;
+        y: -self.height - 2px;
+        background: Palette.background;
+        border-color: Palette.border;
+        border-width: 1px;
+        border-radius: 4px;
+        drop-shadow-blur: 6px;
+        drop-shadow-color: #00000040;
+
+        list := ListView {
+            x: dropdown.border-width;
+            y: dropdown.border-width;
+            width: dropdown.width - 2 * dropdown.border-width;
+            height: dropdown.height - 2 * dropdown.border-width;
+
+            for suggestion[index] in root.suggestions : Rectangle {
+                height: root.row-height;
+                background: index == root.highlighted ? Palette.selection-background
+                    : touch.has-hover ? Palette.alternate-background
+                    : transparent;
+
+                Text {
+                    x: 6px;
+                    width: parent.width - 12px;
+                    height: parent.height;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    text: suggestion;
+                    color: index == root.highlighted ? Palette.selection-foreground : Palette.foreground;
+                }
+
+                touch := TouchArea {
+                    clicked => {
+                        root.pick(index);
+                    }
+                }
+            }
+        }
+    }
+}
