@@ -8,7 +8,7 @@ use std::rc::Rc;
 use slint::{SharedString, VecModel};
 
 use category::Categories;
-use entry::{format_amount, Entry, DATE_FORMAT};
+use entry::{format_amount, shift_date, Entry, DATE_FORMAT};
 use ledger::Ledger;
 
 slint::include_modules!();
@@ -41,6 +41,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
     store.set_category_suggestions(category_suggestions.clone().into());
 
     store.on_add_entry({
+        let window = main_window.as_weak();
         let ledger = ledger.clone();
         let category_suggestions = category_suggestions.clone();
         move |date, name, category, amount| {
@@ -48,8 +49,12 @@ pub fn run() -> Result<(), slint::PlatformError> {
             if ledger.add_entry(&date, &name, &category, &amount).is_err() {
                 return false;
             }
+            // Relies on entries being kept in insertion order: this is the last *entered* entry.
             let entry = ledger.entries().last().expect("entry was just added");
-            rows.push(entry_row(entry, ledger.categories()));
+            let row = entry_row(entry, ledger.categories());
+            let window = window.upgrade().expect("window outlives its callbacks");
+            window.global::<EntriesStore>().set_last_date(row.date.clone());
+            rows.push(row);
             // The inputs are cleared after a successful add and new categories may exist.
             update_suggestions(&category_suggestions, ledger.categories().suggest(""));
             true
@@ -58,6 +63,11 @@ pub fn run() -> Result<(), slint::PlatformError> {
 
     store.on_category_edited(move |text| {
         update_suggestions(&category_suggestions, ledger.borrow().categories().suggest(&text));
+    });
+
+    store.on_shift_date(|text, days| {
+        let today = chrono::Local::now().date_naive();
+        shift_date(&text, days.into(), today).unwrap_or_default().into()
     });
 
     main_window.run()

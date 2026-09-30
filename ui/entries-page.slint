@@ -1,5 +1,6 @@
 import { LineEdit, ListView } from "std-widgets.slint";
 import { Page } from "page.slint";
+import { PrefillLineEdit } from "prefill-line-edit.slint";
 import { SuggestionLineEdit } from "suggestion-line-edit.slint";
 
 export struct EntryRow {
@@ -14,6 +15,11 @@ export global EntriesStore {
     // Arguments: date, name, category, amount.
     // Returns true when the input was valid and the entry has been added.
     callback add-entry(string, string, string, string) -> bool;
+    // Date of the most recently added entry (not the newest date), or empty.
+    in property <string> last-date;
+    // Arguments: date text, number of days (negative moves back). Empty text counts as today.
+    // Returns the shifted date, or "" when the text isn't a valid date.
+    callback shift-date(string, int) -> string;
 
     // Suggestions for the current text of the category input.
     in property <[string]> category-suggestions;
@@ -38,6 +44,8 @@ export component EntriesPage inherits Page {
             category-input.text = "";
             amount-input.text = "";
             date-input.focus();
+            // Focus may not change (Enter pressed in the date input), so prefill explicitly.
+            date-input.prefill();
         }
     }
 
@@ -111,10 +119,23 @@ export component EntriesPage inherits Page {
         HorizontalLayout {
             spacing: root.column-spacing;
 
-            date-input := LineEdit {
+            date-input := PrefillLineEdit {
                 width: root.date-width;
                 placeholder-text: "YYYY-MM-DD";
+                prefill-text: EntriesStore.last-date;
                 accepted => { root.submit(); }
+                // Up/Down move to the previous/next day.
+                key-pressed(event) => {
+                    if (event.text == Key.UpArrow || event.text == Key.DownArrow) {
+                        let shifted = EntriesStore.shift-date(self.text, event.text == Key.UpArrow ? -1 : 1);
+                        if (shifted != "") {
+                            self.text = shifted;
+                            self.select-all();
+                        }
+                        return accept;
+                    }
+                    return reject;
+                }
             }
             name-input := LineEdit {
                 horizontal-stretch: 1;

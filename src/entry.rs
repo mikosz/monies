@@ -1,6 +1,6 @@
 use std::fmt;
 
-use chrono::NaiveDate;
+use chrono::{NaiveDate, TimeDelta};
 
 use crate::category::{CategoryId, CategoryPath};
 
@@ -112,6 +112,19 @@ pub fn format_amount(amount: i64) -> String {
     format!("{sign}{}.{:02}", abs / 100, abs % 100)
 }
 
+/// Shifts the date in `text` by `days` (negative moves back). Empty text counts as `today`.
+/// Returns `None` when the text isn't a valid date or the result is out of range.
+pub fn shift_date(text: &str, days: i64, today: NaiveDate) -> Option<String> {
+    let text = text.trim();
+    let date = if text.is_empty() {
+        today
+    } else {
+        NaiveDate::parse_from_str(text, DATE_FORMAT).ok()?
+    };
+    let shifted = date.checked_add_signed(TimeDelta::try_days(days)?)?;
+    Some(shifted.format(DATE_FORMAT).to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,5 +181,30 @@ mod tests {
         assert_eq!(format_amount(-1250), "-12.50");
         assert_eq!(format_amount(-5), "-0.05");
         assert_eq!(format_amount(i64::MIN), "-92233720368547758.08");
+    }
+
+    #[test]
+    fn shifts_dates() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 1).unwrap();
+        assert_eq!(shift_date("2026-09-30", 1, today).as_deref(), Some("2026-10-01"));
+        assert_eq!(shift_date(" 2026-10-01 ", -1, today).as_deref(), Some("2026-09-30"));
+        assert_eq!(shift_date("2026-12-31", 1, today).as_deref(), Some("2027-01-01"));
+        assert_eq!(shift_date("2028-03-01", -1, today).as_deref(), Some("2028-02-29"));
+        assert_eq!(shift_date("2027-03-01", -1, today).as_deref(), Some("2027-02-28"));
+    }
+
+    #[test]
+    fn shifts_from_today_when_empty() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 1).unwrap();
+        assert_eq!(shift_date("", -1, today).as_deref(), Some("2026-09-30"));
+        assert_eq!(shift_date("  ", 1, today).as_deref(), Some("2026-10-02"));
+    }
+
+    #[test]
+    fn does_not_shift_invalid_dates() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 1).unwrap();
+        assert_eq!(shift_date("2026-10", 1, today), None);
+        assert_eq!(shift_date("2026-02-30", 1, today), None);
+        assert_eq!(shift_date(&NaiveDate::MAX.format(DATE_FORMAT).to_string(), 1, today), None);
     }
 }

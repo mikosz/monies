@@ -1,0 +1,22 @@
+import { LineEdit } from "std-widgets.slint";
+
+// A LineEdit that, when focused while empty, fills in `prefill-text` fully selected,
+// so typing replaces it and moving on keeps it.
+export component PrefillLineEdit inherits LineEdit {
+    in property <string> prefill-text;
+
+    // Fills in `prefill-text` if the field is empty. Also callable when the field already
+    // has focus, e.g. after its text was cleared programmatically.
+    public function prefill() {
+        if (self.text == "" && self.prefill-text != "") {
+            self.text = self.prefill-text;
+            self.select-all();
+        }
+    }
+
+    changed has-focus => {
+        if (self.has-focus) {
+            self.prefill();
+        }
+    }
+}
