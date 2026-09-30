@@ -41,6 +41,8 @@ pub fn run() -> Result<(), slint::PlatformError> {
 
     let store = main_window.global::<EntriesStore>();
     store.set_date_placeholder(date_format.placeholder().into());
+    // Until the first entry is added, the date input is prefilled with today (as of startup).
+    store.set_last_date(date_format.format(chrono::Local::now().date_naive()).into());
     store.set_entries(rows.clone().into());
     store.set_category_suggestions(category_suggestions.clone().into());
 
