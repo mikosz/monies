@@ -2625,6 +2625,7 @@ dependencies = [
  "slint",
  "slint-build",
  "wasm-bindgen",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

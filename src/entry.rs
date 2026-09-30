@@ -1,11 +1,9 @@
 use std::fmt;
 
-use chrono::{NaiveDate, TimeDelta};
+use chrono::NaiveDate;
 
 use crate::category::{CategoryId, CategoryPath};
-
-/// Format used both for parsing user input and for displaying dates.
-pub const DATE_FORMAT: &str = "%Y-%m-%d";
+use crate::date_format::DateFormat;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
@@ -37,7 +35,7 @@ pub enum EntryError {
 impl fmt::Display for EntryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            EntryError::InvalidDate => write!(f, "date must be in YYYY-MM-DD format"),
+            EntryError::InvalidDate => write!(f, "date is not in the expected format"),
             EntryError::EmptyName => write!(f, "name must not be empty"),
             EntryError::EmptyCategory => write!(f, "category must not be empty"),
             EntryError::InvalidAmount => write!(f, "amount must be a number with at most two decimal places"),
@@ -49,9 +47,14 @@ impl std::error::Error for EntryError {}
 
 impl ParsedEntry {
     /// Validates raw user input. Surrounding whitespace is ignored.
-    pub fn parse(date: &str, name: &str, category: &str, amount: &str) -> Result<Self, EntryError> {
-        let date = NaiveDate::parse_from_str(date.trim(), DATE_FORMAT)
-            .map_err(|_| EntryError::InvalidDate)?;
+    pub fn parse(
+        date_format: &DateFormat,
+        date: &str,
+        name: &str,
+        category: &str,
+        amount: &str,
+    ) -> Result<Self, EntryError> {
+        let date = date_format.parse(date).ok_or(EntryError::InvalidDate)?;
 
         let name = name.trim();
         if name.is_empty() {
@@ -112,26 +115,17 @@ pub fn format_amount(amount: i64) -> String {
     format!("{sign}{}.{:02}", abs / 100, abs % 100)
 }
 
-/// Shifts the date in `text` by `days` (negative moves back). Empty text counts as `today`.
-/// Returns `None` when the text isn't a valid date or the result is out of range.
-pub fn shift_date(text: &str, days: i64, today: NaiveDate) -> Option<String> {
-    let text = text.trim();
-    let date = if text.is_empty() {
-        today
-    } else {
-        NaiveDate::parse_from_str(text, DATE_FORMAT).ok()?
-    };
-    let shifted = date.checked_add_signed(TimeDelta::try_days(days)?)?;
-    Some(shifted.format(DATE_FORMAT).to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn parse(date: &str, name: &str, category: &str, amount: &str) -> Result<ParsedEntry, EntryError> {
+        ParsedEntry::parse(&DateFormat::iso(), date, name, category, amount)
+    }
+
     #[test]
     fn parses_valid_entry() {
-        let entry = ParsedEntry::parse(" 2026-09-30 ", " Groceries ", " Food.Shop ", "12.5").unwrap();
+        let entry = parse(" 2026-09-30 ", " Groceries ", " Food.Shop ", "12.5").unwrap();
         assert_eq!(entry.date, NaiveDate::from_ymd_opt(2026, 9, 30).unwrap());
         assert_eq!(entry.name, "Groceries");
         assert_eq!(entry.category.names(), ["Food", "Shop"]);
@@ -140,20 +134,20 @@ mod tests {
 
     #[test]
     fn rejects_empty_category() {
-        assert_eq!(ParsedEntry::parse("2026-09-30", "a", " ", "1"), Err(EntryError::EmptyCategory));
-        assert_eq!(ParsedEntry::parse("2026-09-30", "a", ".", "1"), Err(EntryError::EmptyCategory));
+        assert_eq!(parse("2026-09-30", "a", " ", "1"), Err(EntryError::EmptyCategory));
+        assert_eq!(parse("2026-09-30", "a", ".", "1"), Err(EntryError::EmptyCategory));
     }
 
     #[test]
     fn rejects_invalid_date() {
-        assert_eq!(ParsedEntry::parse("30.09.2026", "a", "c", "1"), Err(EntryError::InvalidDate));
-        assert_eq!(ParsedEntry::parse("2026-02-30", "a", "c", "1"), Err(EntryError::InvalidDate));
-        assert_eq!(ParsedEntry::parse("", "a", "c", "1"), Err(EntryError::InvalidDate));
+        assert_eq!(parse("30.09.2026", "a", "c", "1"), Err(EntryError::InvalidDate));
+        assert_eq!(parse("2026-02-30", "a", "c", "1"), Err(EntryError::InvalidDate));
+        assert_eq!(parse("", "a", "c", "1"), Err(EntryError::InvalidDate));
     }
 
     #[test]
     fn rejects_empty_name() {
-        assert_eq!(ParsedEntry::parse("2026-09-30", "  ", "c", "1"), Err(EntryError::EmptyName));
+        assert_eq!(parse("2026-09-30", "  ", "c", "1"), Err(EntryError::EmptyName));
     }
 
     #[test]
@@ -181,30 +175,5 @@ mod tests {
         assert_eq!(format_amount(-1250), "-12.50");
         assert_eq!(format_amount(-5), "-0.05");
         assert_eq!(format_amount(i64::MIN), "-92233720368547758.08");
-    }
-
-    #[test]
-    fn shifts_dates() {
-        let today = NaiveDate::from_ymd_opt(2026, 10, 1).unwrap();
-        assert_eq!(shift_date("2026-09-30", 1, today).as_deref(), Some("2026-10-01"));
-        assert_eq!(shift_date(" 2026-10-01 ", -1, today).as_deref(), Some("2026-09-30"));
-        assert_eq!(shift_date("2026-12-31", 1, today).as_deref(), Some("2027-01-01"));
-        assert_eq!(shift_date("2028-03-01", -1, today).as_deref(), Some("2028-02-29"));
-        assert_eq!(shift_date("2027-03-01", -1, today).as_deref(), Some("2027-02-28"));
-    }
-
-    #[test]
-    fn shifts_from_today_when_empty() {
-        let today = NaiveDate::from_ymd_opt(2026, 10, 1).unwrap();
-        assert_eq!(shift_date("", -1, today).as_deref(), Some("2026-09-30"));
-        assert_eq!(shift_date("  ", 1, today).as_deref(), Some("2026-10-02"));
-    }
-
-    #[test]
-    fn does_not_shift_invalid_dates() {
-        let today = NaiveDate::from_ymd_opt(2026, 10, 1).unwrap();
-        assert_eq!(shift_date("2026-10", 1, today), None);
-        assert_eq!(shift_date("2026-02-30", 1, today), None);
-        assert_eq!(shift_date(&NaiveDate::MAX.format(DATE_FORMAT).to_string(), 1, today), None);
     }
 }

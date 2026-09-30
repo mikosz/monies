@@ -1,4 +1,5 @@
 mod category;
+mod date_format;
 mod entry;
 mod ledger;
 
@@ -8,14 +9,15 @@ use std::rc::Rc;
 use slint::{SharedString, VecModel};
 
 use category::Categories;
-use entry::{format_amount, shift_date, Entry, DATE_FORMAT};
+use date_format::DateFormat;
+use entry::{format_amount, Entry, ParsedEntry};
 use ledger::Ledger;
 
 slint::include_modules!();
 
-fn entry_row(entry: &Entry, categories: &Categories) -> EntryRow {
+fn entry_row(entry: &Entry, categories: &Categories, date_format: &DateFormat) -> EntryRow {
     EntryRow {
-        date: entry.date.format(DATE_FORMAT).to_string().into(),
+        date: date_format.format(entry.date).into(),
         name: entry.name.as_str().into(),
         category: categories.path(entry.category).into(),
         amount: format_amount(entry.amount).into(),
@@ -30,6 +32,7 @@ fn update_suggestions(model: &VecModel<SharedString>, suggestions: Vec<String>) 
 pub fn run() -> Result<(), slint::PlatformError> {
     let main_window = MainWindow::new()?;
 
+    let date_format = Rc::new(DateFormat::system());
     // The ledger is the source of truth; `rows` mirrors its entries for display.
     let ledger = Rc::new(RefCell::new(Ledger::default()));
     let rows = Rc::new(VecModel::<EntryRow>::default());
@@ -37,21 +40,24 @@ pub fn run() -> Result<(), slint::PlatformError> {
     let category_suggestions = Rc::new(VecModel::<SharedString>::default());
 
     let store = main_window.global::<EntriesStore>();
+    store.set_date_placeholder(date_format.placeholder().into());
     store.set_entries(rows.clone().into());
     store.set_category_suggestions(category_suggestions.clone().into());
 
     store.on_add_entry({
         let window = main_window.as_weak();
+        let date_format = date_format.clone();
         let ledger = ledger.clone();
         let category_suggestions = category_suggestions.clone();
         move |date, name, category, amount| {
-            let mut ledger = ledger.borrow_mut();
-            if ledger.add_entry(&date, &name, &category, &amount).is_err() {
+            let Ok(parsed) = ParsedEntry::parse(&date_format, &date, &name, &category, &amount) else {
                 return false;
-            }
+            };
+            let mut ledger = ledger.borrow_mut();
+            ledger.add_entry(parsed);
             // Relies on entries being kept in insertion order: this is the last *entered* entry.
             let entry = ledger.entries().last().expect("entry was just added");
-            let row = entry_row(entry, ledger.categories());
+            let row = entry_row(entry, ledger.categories(), &date_format);
             let window = window.upgrade().expect("window outlives its callbacks");
             window.global::<EntriesStore>().set_last_date(row.date.clone());
             rows.push(row);
@@ -65,9 +71,9 @@ pub fn run() -> Result<(), slint::PlatformError> {
         update_suggestions(&category_suggestions, ledger.borrow().categories().suggest(&text));
     });
 
-    store.on_shift_date(|text, days| {
+    store.on_shift_date(move |text, days| {
         let today = chrono::Local::now().date_naive();
-        shift_date(&text, days.into(), today).unwrap_or_default().into()
+        date_format.shift(&text, days.into(), today).unwrap_or_default().into()
     });
 
     main_window.run()

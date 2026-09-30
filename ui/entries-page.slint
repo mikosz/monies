@@ -17,6 +17,8 @@ export global EntriesStore {
     callback add-entry(string, string, string, string) -> bool;
     // Date of the most recently added entry (not the newest date), or empty.
     in property <string> last-date;
+    // Shows the expected date format, e.g. "D.MM.YYYY".
+    in property <string> date-placeholder;
     // Arguments: date text, number of days (negative moves back). Empty text counts as today.
     // Returns the shifted date, or "" when the text isn't a valid date.
     callback shift-date(string, int) -> string;
@@ -121,7 +123,7 @@ export component EntriesPage inherits Page {
 
             date-input := PrefillLineEdit {
                 width: root.date-width;
-                placeholder-text: "YYYY-MM-DD";
+                placeholder-text: EntriesStore.date-placeholder;
                 prefill-text: EntriesStore.last-date;
                 accepted => { root.submit(); }
                 // Up/Down move to the previous/next day.
