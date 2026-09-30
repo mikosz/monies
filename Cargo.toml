@@ -14,6 +14,11 @@ chrono = { version = "0.4.45", default-features = false, features = ["std", "clo
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2.129"
 
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# `bundled` compiles SQLite in; `chrono` maps NaiveDate to ISO text.
+rusqlite = { version = "0.40", features = ["bundled", "chrono"] }
+directories = "6"
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Globalization"] }
 

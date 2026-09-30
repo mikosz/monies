@@ -1,8 +1,11 @@
+use std::collections::BTreeMap;
+
 /// Separates category names in a path, e.g. `dogs.health.pills`.
 pub const SEPARATOR: char = '.';
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct CategoryId(usize);
+/// Identifies a category; assigned by the store (the database row id).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CategoryId(pub i64);
 
 #[derive(Debug, Clone)]
 struct Category {
@@ -33,37 +36,49 @@ impl CategoryPath {
     }
 }
 
+/// Categories that have to be created for a path: a chain in which the first name is a child
+/// of `parent` (top-level when `None`) and each following name is a child of the previous one.
+///
+/// When `names` is empty, the whole path exists and `parent` is the category it refers to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MissingCategories<'a> {
+    pub parent: Option<CategoryId>,
+    pub names: &'a [String],
+}
+
 /// The category tree. Categories are referred to by [`CategoryId`], so renaming or moving
 /// a category is reflected everywhere it's used.
 ///
 /// Names are matched case-insensitively; a category keeps the spelling it was created with.
 #[derive(Debug, Default)]
 pub struct Categories {
-    categories: Vec<Category>,
+    categories: BTreeMap<CategoryId, Category>,
 }
 
 impl Categories {
-    pub fn find(&self, path: &CategoryPath) -> Option<CategoryId> {
-        path.names()
-            .iter()
-            .try_fold(None, |parent, name| self.find_child(parent, name).map(Some))
-            .flatten()
+    /// Adds a category. A parent may be inserted after its children (e.g. when loading), but
+    /// must exist before the tree is queried.
+    pub fn insert(&mut self, id: CategoryId, name: String, parent: Option<CategoryId>) {
+        self.categories.insert(id, Category { name, parent });
     }
 
-    /// Returns the category at `path`, creating it and any missing ancestors.
-    pub fn get_or_create(&mut self, path: &CategoryPath) -> CategoryId {
-        let mut parent = None;
-        for name in path.names() {
-            let id = match self.find_child(parent, name) {
-                Some(id) => id,
-                None => {
-                    self.categories.push(Category { name: name.clone(), parent });
-                    CategoryId(self.categories.len() - 1)
-                }
-            };
-            parent = Some(id);
+    pub fn find(&self, path: &CategoryPath) -> Option<CategoryId> {
+        match self.missing(path) {
+            MissingCategories { parent, names: [] } => parent,
+            _ => None,
         }
-        parent.expect("category path is never empty")
+    }
+
+    /// Which categories of `path` don't exist yet, see [`MissingCategories`].
+    pub fn missing<'a>(&self, path: &'a CategoryPath) -> MissingCategories<'a> {
+        let mut parent = None;
+        for (index, name) in path.names().iter().enumerate() {
+            match self.find_child(parent, name) {
+                Some(id) => parent = Some(id),
+                None => return MissingCategories { parent, names: &path.names()[index..] },
+            }
+        }
+        MissingCategories { parent, names: &[] }
     }
 
     /// Full path of the category, e.g. `dogs.health.pills`.
@@ -95,8 +110,7 @@ impl Categories {
 
         let mut level = Vec::new();
         let mut deeper = Vec::new();
-        for (index, category) in self.categories.iter().enumerate() {
-            let id = CategoryId(index);
+        for (&id, category) in &self.categories {
             let name = category.name.to_lowercase();
             if !name.contains(&fragment) {
                 continue;
@@ -121,13 +135,13 @@ impl Categories {
         let name = name.to_lowercase();
         self.categories
             .iter()
-            .position(|c| c.parent == parent && c.name.to_lowercase() == name)
-            .map(CategoryId)
+            .find(|(_, c)| c.parent == parent && c.name.to_lowercase() == name)
+            .map(|(&id, _)| id)
     }
 
     fn ancestors_and_self(&self, id: CategoryId) -> impl Iterator<Item = &Category> {
-        std::iter::successors(Some(&self.categories[id.0]), |c| {
-            c.parent.map(|parent| &self.categories[parent.0])
+        std::iter::successors(Some(&self.categories[&id]), |c| {
+            c.parent.map(|parent| &self.categories[&parent])
         })
     }
 
@@ -135,8 +149,8 @@ impl Categories {
     fn is_descendant(&self, id: CategoryId, ancestor: Option<CategoryId>) -> bool {
         match ancestor {
             None => true,
-            Some(ancestor) => std::iter::successors(self.categories[id.0].parent, |parent| {
-                self.categories[parent.0].parent
+            Some(ancestor) => std::iter::successors(self.categories[&id].parent, |parent| {
+                self.categories[parent].parent
             })
             .any(|parent| parent == ancestor),
         }
@@ -149,6 +163,20 @@ mod tests {
 
     fn path(input: &str) -> CategoryPath {
         CategoryPath::parse(input).unwrap()
+    }
+
+    impl Categories {
+        /// Creates missing categories with ids following the highest existing one.
+        fn get_or_create(&mut self, path: &CategoryPath) -> CategoryId {
+            let missing = self.missing(path);
+            let mut parent = missing.parent;
+            for name in missing.names {
+                let id = CategoryId(self.categories.keys().last().map_or(1, |id| id.0 + 1));
+                self.insert(id, name.clone(), parent);
+                parent = Some(id);
+            }
+            parent.expect("category path is never empty")
+        }
     }
 
     fn categories(paths: &[&str]) -> Categories {
@@ -181,20 +209,34 @@ mod tests {
     }
 
     #[test]
-    fn creates_missing_ancestors() {
-        let mut categories = Categories::default();
-        let pills = categories.get_or_create(&path("dogs.health.pills"));
-        assert_eq!(categories.path(pills), "dogs.health.pills");
-        assert!(categories.find(&path("dogs")).is_some());
-        assert!(categories.find(&path("dogs.health")).is_some());
+    fn reports_missing_categories() {
+        let categories = categories(&["dogs.health"]);
+        let dogs = categories.find(&path("dogs")).unwrap();
+        let health = categories.find(&path("dogs.health")).unwrap();
+
+        let pills = path("dogs.health.pills");
+        assert_eq!(categories.missing(&pills), MissingCategories { parent: Some(health), names: &pills.names()[2..] });
+        let food = path("Dogs.food.dry");
+        assert_eq!(categories.missing(&food), MissingCategories { parent: Some(dogs), names: &food.names()[1..] });
+        let cats = path("cats.food");
+        assert_eq!(categories.missing(&cats), MissingCategories { parent: None, names: cats.names() });
+        let existing = path("dogs.HEALTH");
+        assert_eq!(categories.missing(&existing), MissingCategories { parent: Some(health), names: &[] });
     }
 
     #[test]
-    fn reuses_existing_categories_case_insensitively() {
+    fn allows_parents_inserted_after_children() {
         let mut categories = Categories::default();
-        let rent = categories.get_or_create(&path("Bills.Rent"));
-        assert_eq!(categories.get_or_create(&path("bills.rent")), rent);
-        assert_eq!(categories.find(&path("BILLS.RENT")), Some(rent));
+        categories.insert(CategoryId(2), "rent".to_owned(), Some(CategoryId(1)));
+        categories.insert(CategoryId(1), "bills".to_owned(), None);
+        assert_eq!(categories.path(CategoryId(2)), "bills.rent");
+        assert_eq!(categories.find(&path("bills.rent")), Some(CategoryId(2)));
+    }
+
+    #[test]
+    fn finds_categories_case_insensitively() {
+        let categories = categories(&["Bills.Rent"]);
+        let rent = categories.find(&path("BILLS.RENT")).unwrap();
         assert_eq!(categories.path(rent), "Bills.Rent");
     }
 
