@@ -171,6 +171,15 @@ fn apply_op(transaction: &Transaction, op: &Op) -> Result<(), StorageError> {
                 return Err(StorageError::MissingRow { table: "entries" });
             }
         }
+        Op::UpdateEntry { id, after, .. } => {
+            let updated = transaction.execute(
+                "UPDATE entries SET date = ?2, name = ?3, category_id = ?4, amount = ?5 WHERE id = ?1",
+                params![id.0, after.date, after.name, after.category.0, after.amount],
+            )?;
+            if updated != 1 {
+                return Err(StorageError::MissingRow { table: "entries" });
+            }
+        }
     }
     Ok(())
 }
@@ -294,6 +303,41 @@ mod tests {
 
         assert!(matches!(store.apply(&change.inverse()), Err(StorageError::MissingRow { table: "entries" })));
         assert_eq!(count(&store, "categories"), 1, "nothing was deleted");
+    }
+
+    #[test]
+    fn updates_and_reverts_entry() {
+        let mut store = SqliteStore::open_in_memory().unwrap();
+        let mut ledger = Ledger::default();
+        add(&mut ledger, &mut store, &[("2026-10-01", "Rent", "bills", "1")]).unwrap();
+        let (id, current) = ledger.entries()[0].clone();
+
+        let mut builder = ChangeBuilder::new("Edit", ledger.categories());
+        let parsed = ParsedEntry::parse(&DateFormat::iso(), "2026-10-02", "Flat", "bills.rent", "2").unwrap();
+        builder.update_entry(id, &current, parsed);
+        let change = builder.build();
+        ledger.apply(&mut store, &change).unwrap();
+        assert_eq!(store.load().unwrap().entries(), ledger.entries());
+        assert_eq!(ledger.entry(id).unwrap().name, "Flat");
+
+        ledger.apply(&mut store, &change.inverse()).unwrap();
+        assert_eq!(store.load().unwrap().entries(), ledger.entries());
+        assert_eq!(ledger.entry(id), Some(&current));
+        assert_eq!(count(&store, "categories"), 1, "the category created by the edit is removed");
+    }
+
+    #[test]
+    fn updating_missing_row_fails() {
+        let mut store = SqliteStore::open_in_memory().unwrap();
+        let mut ledger = Ledger::default();
+        add(&mut ledger, &mut store, &[("2026-10-01", "Rent", "bills", "1")]).unwrap();
+        let (id, current) = ledger.entries()[0].clone();
+        store.connection.execute_batch("DELETE FROM entries").unwrap();
+
+        let mut builder = ChangeBuilder::new("Edit", ledger.categories());
+        let parsed = ParsedEntry::parse(&DateFormat::iso(), "2026-10-01", "Flat", "bills", "1").unwrap();
+        builder.update_entry(id, &current, parsed);
+        assert!(matches!(store.apply(&builder.build()), Err(StorageError::MissingRow { table: "entries" })));
     }
 
     #[test]

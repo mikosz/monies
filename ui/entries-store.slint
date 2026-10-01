@@ -1,0 +1,29 @@
+import { EntryRow } from "entry-line.slint";
+
+// Entries and the operations on them, implemented in Rust.
+export global EntriesStore {
+    in property <[EntryRow]> entries;
+    // Arguments: date, name, category, amount.
+    // Returns true when the input was valid and the entry has been added.
+    callback add-entry(string, string, string, string) -> bool;
+    // Arguments: id, date, name, category, amount.
+    // Returns true when the input was valid and the entry has been saved (or was unchanged).
+    callback update-entry(string, string, string, string, string) -> bool;
+
+    // Id of the entry being edited in place, or "" when none is. While editing, everything
+    // else is disabled.
+    in-out property <string> editing-id;
+
+    // Date of the most recently added entry (not the newest date); today before any entry.
+    in property <string> last-date;
+    // Shows the expected date format, e.g. "D.MM.YYYY".
+    in property <string> date-placeholder;
+    // Arguments: date text, number of days (negative moves back). Empty text counts as today.
+    // Returns the shifted date, or "" when the text isn't a valid date.
+    callback shift-date(string, int) -> string;
+
+    // Suggestions for the text last reported through `category-edited`.
+    in property <[string]> category-suggestions;
+    // Called with the text of a category input when it gains focus or changes.
+    callback category-edited(string);
+}

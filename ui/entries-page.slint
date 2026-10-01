@@ -1,31 +1,10 @@
-import { LineEdit, ListView } from "std-widgets.slint";
-import { EntryKind, EntryLine, EntryRow } from "entry-line.slint";
+import { ListView, Palette } from "std-widgets.slint";
+import { EntriesStore } from "entries-store.slint";
+import { EntryEditor } from "entry-editor.slint";
+import { EntryColumn, EntryKind, EntryLine, EntryRow } from "entry-line.slint";
 import { Page } from "page.slint";
-import { PrefillLineEdit } from "prefill-line-edit.slint";
-import { SuggestionLineEdit } from "suggestion-line-edit.slint";
 
-export { EntryKind, EntryRow }
-
-export global EntriesStore {
-    in property <[EntryRow]> entries;
-    // Arguments: date, name, category, amount.
-    // Returns true when the input was valid and the entry has been added.
-    callback add-entry(string, string, string, string) -> bool;
-    // Date of the most recently added entry (not the newest date); today before any entry.
-    in property <string> last-date;
-    // Shows the expected date format, e.g. "D.MM.YYYY".
-    in property <string> date-placeholder;
-    // Arguments: date text, number of days (negative moves back). Empty text counts as today.
-    // Returns the shifted date, or "" when the text isn't a valid date.
-    callback shift-date(string, int) -> string;
-
-    // Suggestions for the current text of the category input.
-    in property <[string]> category-suggestions;
-    // The text of the category input, so suggestions can be refreshed after undo/redo.
-    in-out property <string> category-text;
-    // Called with the new text whenever the category input changes.
-    callback category-edited(string);
-}
+export { EntriesStore, EntryKind, EntryRow }
 
 export component EntriesPage inherits Page {
     title: "Entries";
@@ -39,50 +18,58 @@ export component EntriesPage inherits Page {
     // Padding inside an entry line; the header uses the same so its titles align.
     property <length> line-padding: 8px;
 
-    function submit() {
-        if (EntriesStore.add-entry(date-input.text, name-input.text, category-input.text, amount-input.text)) {
-            date-input.text = "";
-            name-input.text = "";
-            category-input.text = "";
-            amount-input.text = "";
-            date-input.focus();
-            // Focus may not change (Enter pressed in the date input), so prefill explicitly.
-            date-input.prefill();
-        }
+    // Editing is modal: while a line is edited, everything else is dimmed and disabled.
+    property <bool> editing: EntriesStore.editing-id != "";
+    // Column to focus when the editor opens.
+    property <EntryColumn> edit-column;
+
+    function start-edit(id: string, column: EntryColumn) {
+        root.edit-column = column;
+        EntriesStore.editing-id = id;
+    }
+
+    function finish-edit() {
+        EntriesStore.editing-id = "";
+        input-row.focus-column(EntryColumn.date);
     }
 
     VerticalLayout {
         spacing: 4px;
 
-        HorizontalLayout {
-            padding-left: root.line-padding;
-            padding-right: root.line-padding;
-            spacing: root.column-spacing;
+        // Layouts have no opacity, hence the rectangle.
+        Rectangle {
+            opacity: root.editing ? 0.4 : 1;
 
-            Text {
-                width: root.date-width;
-                text: "Date";
-                font-weight: 700;
-            }
-            Text {
-                horizontal-stretch: 1;
-                min-width: root.flexible-width;
-                preferred-width: root.flexible-width;
-                text: "Name";
-                font-weight: 700;
-            }
-            Text {
-                horizontal-stretch: 1;
-                min-width: root.flexible-width;
-                preferred-width: root.flexible-width;
-                text: "Category";
-                font-weight: 700;
-            }
-            Text {
-                width: root.amount-width;
-                text: "Amount";
-                font-weight: 700;
-                horizontal-alignment: right;
+            HorizontalLayout {
+                padding-left: root.line-padding;
+                padding-right: root.line-padding;
+                spacing: root.column-spacing;
+
+                Text {
+                    width: root.date-width;
+                    text: "Date";
+                    font-weight: 700;
+                }
+                Text {
+                    horizontal-stretch: 1;
+                    min-width: root.flexible-width;
+                    preferred-width: root.flexible-width;
+                    text: "Name";
+                    font-weight: 700;
+                }
+                Text {
+                    horizontal-stretch: 1;
+                    min-width: root.flexible-width;
+                    preferred-width: root.flexible-width;
+                    text: "Category";
+                    font-weight: 700;
+                }
+                Text {
+                    width: root.amount-width;
+                    text: "Amount";
+                    font-weight: 700;
+                    horizontal-alignment: right;
+                }
             }
         }
 
@@ -93,62 +80,60 @@ export component EntriesPage inherits Page {
             for row in EntriesStore.entries : VerticalLayout {
                 padding-bottom: 3px;
 
-                EntryLine {
+                if row.id != EntriesStore.editing-id : EntryLine {
                     entry: row;
+                    dimmed: root.editing;
                     column-spacing: root.column-spacing;
                     date-width: root.date-width;
                     amount-width: root.amount-width;
                     flexible-width: root.flexible-width;
                     horizontal-padding: root.line-padding;
+                    double-clicked(column) => { root.start-edit(row.id, column); }
+                }
+
+                if row.id == EntriesStore.editing-id : Rectangle {
+                    border-width: 1px;
+                    border-color: Palette.accent-background;
+                    border-radius: 4px;
+
+                    VerticalLayout {
+                        padding: 2px;
+
+                        EntryEditor {
+                            column-spacing: root.column-spacing;
+                            date-width: root.date-width;
+                            amount-width: root.amount-width;
+                            flexible-width: root.flexible-width;
+                            trap-focus: true;
+                            init => {
+                                self.date = row.date;
+                                self.name = row.name;
+                                self.category = row.category;
+                                self.amount = row.amount;
+                                self.focus-column(root.edit-column);
+                            }
+                            submitted => {
+                                if (EntriesStore.update-entry(row.id, self.date, self.name, self.category, self.amount)) {
+                                    root.finish-edit();
+                                }
+                            }
+                            cancelled => { root.finish-edit(); }
+                        }
+                    }
                 }
             }
         }
 
-        HorizontalLayout {
-            spacing: root.column-spacing;
-
-            date-input := PrefillLineEdit {
-                width: root.date-width;
-                placeholder-text: EntriesStore.date-placeholder;
-                prefill-text: EntriesStore.last-date;
-                accepted => { root.submit(); }
-                // Up/Down move to the previous/next day.
-                key-pressed(event) => {
-                    if (event.text == Key.UpArrow || event.text == Key.DownArrow) {
-                        let shifted = EntriesStore.shift-date(self.text, event.text == Key.UpArrow ? -1 : 1);
-                        if (shifted != "") {
-                            self.text = shifted;
-                            self.select-all();
-                        }
-                        return accept;
-                    }
-                    return reject;
+        input-row := EntryEditor {
+            enabled: !root.editing;
+            column-spacing: root.column-spacing;
+            date-width: root.date-width;
+            amount-width: root.amount-width;
+            flexible-width: root.flexible-width;
+            submitted => {
+                if (EntriesStore.add-entry(self.date, self.name, self.category, self.amount)) {
+                    self.reset();
                 }
-            }
-            name-input := LineEdit {
-                horizontal-stretch: 1;
-                min-width: root.flexible-width;
-                preferred-width: root.flexible-width;
-                placeholder-text: "Name";
-                accepted => { root.submit(); }
-            }
-            category-input := SuggestionLineEdit {
-                horizontal-stretch: 1;
-                min-width: root.flexible-width;
-                preferred-width: root.flexible-width;
-                placeholder-text: "Category, e.g. bills.rent";
-                text <=> EntriesStore.category-text;
-                suggestions: EntriesStore.category-suggestions;
-                // Picking a category continues with its subcategories.
-                pick-suffix: ".";
-                edited(text) => { EntriesStore.category-edited(text); }
-                accepted => { root.submit(); }
-            }
-            amount-input := LineEdit {
-                width: root.amount-width;
-                placeholder-text: "Amount";
-                horizontal-alignment: right;
-                accepted => { root.submit(); }
             }
         }
     }

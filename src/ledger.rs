@@ -17,6 +17,7 @@ pub struct Ledger {
 pub enum EntryListUpdate {
     Inserted { index: usize, id: EntryId },
     Removed { index: usize },
+    Updated { index: usize },
 }
 
 impl Ledger {
@@ -65,6 +66,11 @@ impl Ledger {
                 self.entries.remove(index);
                 Some(EntryListUpdate::Removed { index })
             }
+            Op::UpdateEntry { id, after, .. } => {
+                let index = self.index_of(*id).expect("updated entry exists");
+                self.entries[index].1 = after.clone();
+                Some(EntryListUpdate::Updated { index })
+            }
         }
     }
 
@@ -81,9 +87,13 @@ mod tests {
     use crate::entry::ParsedEntry;
     use crate::store::MemoryStore;
 
+    fn parsed(category: &str, amount: &str) -> ParsedEntry {
+        ParsedEntry::parse(&DateFormat::iso(), "2026-09-30", "Rent", category, amount).unwrap()
+    }
+
     fn add(ledger: &mut Ledger, category: &str) -> (Change, Vec<EntryListUpdate>) {
         let mut builder = ChangeBuilder::new("Add", ledger.categories());
-        builder.add_entry(ParsedEntry::parse(&DateFormat::iso(), "2026-09-30", "Rent", category, "1").unwrap());
+        builder.add_entry(parsed(category, "1"));
         let change = builder.build();
         let updates = ledger.apply(&mut MemoryStore, &change).unwrap();
         (change, updates)
@@ -122,5 +132,26 @@ mod tests {
         let [EntryListUpdate::Inserted { index: 1, id }] = updates[..] else { panic!("{updates:?}") };
         assert_eq!(paths(&ledger), ["bills.rent", "dogs.health", "bills.water"], "redo puts it back in place");
         assert!(ledger.entry(id).is_some());
+    }
+
+    #[test]
+    fn updates_entry_in_place() {
+        let mut ledger = Ledger::default();
+        add(&mut ledger, "bills.rent");
+        add(&mut ledger, "food");
+        let (id, current) = ledger.entries()[0].clone();
+
+        let mut builder = ChangeBuilder::new("Edit", ledger.categories());
+        builder.update_entry(id, &current, parsed("bills.water", "-5"));
+        let change = builder.build();
+        let updates = ledger.apply(&mut MemoryStore, &change).unwrap();
+
+        assert_eq!(updates, [EntryListUpdate::Updated { index: 0 }]);
+        assert_eq!(paths(&ledger), ["bills.water", "food"]);
+        assert_eq!(ledger.entry(id).unwrap().amount, -500);
+
+        ledger.apply(&mut MemoryStore, &change.inverse()).unwrap();
+        assert_eq!(ledger.entry(id), Some(&current));
+        assert!(ledger.categories().suggest("bills.").iter().all(|path| path != "bills.water"));
     }
 }

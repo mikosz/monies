@@ -20,7 +20,8 @@ export component MainWindow inherits Window {
         focus-on-tab-navigation: false;
 
         capture-key-pressed(event) => {
-            if (event.modifiers.control && !event.modifiers.alt) {
+            // Undo/redo is off while an entry is edited; the fields then get the keys instead.
+            if (event.modifiers.control && !event.modifiers.alt && EntriesStore.editing-id == "") {
                 if (event.text == "z" || event.text == "Z") {
                     if (event.modifiers.shift) {
                         UndoRedo.redo();
@@ -41,6 +42,8 @@ export component MainWindow inherits Window {
             side-bar := SideBar {
 //                title: "How do I hide this label?";
                 model: ["Entries", "Summary"];
+                // Editing is modal: pages can't be switched meanwhile.
+                enabled: EntriesStore.editing-id == "";
             }
 
             if(side-bar.current-item == 0) : EntriesPage {}

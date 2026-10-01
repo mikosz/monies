@@ -6,18 +6,23 @@ import { LineEdit, ListView, Palette } from "std-widgets.slint";
 //
 // Keys: Down/Up highlight the first/last suggestion and then move the highlight, wrapping
 // around at either end. Enter/Tab pick the highlighted suggestion, Escape removes the
-// highlight. Enter without a highlight is passed on as `accepted`.
+// highlight. Other keys (including Escape without a highlight) go to `key-pressed`; Enter
+// without a highlight is passed on as `accepted`.
 export component SuggestionLineEdit {
     in property <[string]> suggestions;
     in property <int> max-visible-suggestions: 6;
     in property <string> placeholder-text <=> input.placeholder-text;
+    in property <bool> enabled <=> input.enabled;
     // Appended to a suggestion when it's picked, e.g. a separator to continue typing a path.
     in property <string> pick-suffix: "";
     in-out property <string> text <=> input.text;
 
-    // Called with the new text after the user edits it or picks a suggestion.
+    // Called with the text when the input gains focus, the user edits it or picks a
+    // suggestion, so the owner can keep `suggestions` up to date.
     callback edited(string);
     callback accepted(string);
+    // Keys not used by the dropdown, like LineEdit's `key-pressed`.
+    callback key-pressed(KeyEvent) -> EventResult;
 
     // Index into `suggestions`, or -1 when nothing is highlighted.
     property <int> highlighted: -1;
@@ -25,6 +30,10 @@ export component SuggestionLineEdit {
     property <bool> dropdown-open: input.has-focus && root.suggestions.length > 0;
 
     forward-focus: input;
+
+    public function select-all() {
+        input.select-all();
+    }
 
     function pick(index: int) {
         input.text = root.suggestions[index] + root.pick-suffix;
@@ -59,6 +68,11 @@ export component SuggestionLineEdit {
 
     VerticalLayout {
         input := LineEdit {
+            changed has-focus => {
+                if (self.has-focus) {
+                    root.edited(self.text);
+                }
+            }
             edited(text) => {
                 root.reset-highlight();
                 root.edited(text);
@@ -67,26 +81,27 @@ export component SuggestionLineEdit {
                 root.accepted(text);
             }
             key-pressed(event) => {
-                if (!root.dropdown-open) {
-                    return reject;
+                if (root.dropdown-open) {
+                    if (event.text == Key.DownArrow) {
+                        root.move-highlight(1);
+                        return accept;
+                    }
+                    if (event.text == Key.UpArrow) {
+                        root.move-highlight(-1);
+                        return accept;
+                    }
+                    if (root.highlighted >= 0) {
+                        if (event.text == Key.Escape) {
+                            root.reset-highlight();
+                            return accept;
+                        }
+                        if (event.text == Key.Return || event.text == Key.Tab) {
+                            root.pick(root.highlighted);
+                            return accept;
+                        }
+                    }
                 }
-                if (event.text == Key.DownArrow) {
-                    root.move-highlight(1);
-                    return accept;
-                }
-                if (event.text == Key.UpArrow) {
-                    root.move-highlight(-1);
-                    return accept;
-                }
-                if (event.text == Key.Escape) {
-                    root.reset-highlight();
-                    return accept;
-                }
-                if (root.highlighted >= 0 && (event.text == Key.Return || event.text == Key.Tab)) {
-                    root.pick(root.highlighted);
-                    return accept;
-                }
-                return reject;
+                return root.key-pressed(event);
             }
         }
     }

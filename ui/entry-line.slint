@@ -2,7 +2,11 @@ import { Palette } from "std-widgets.slint";
 
 export enum EntryKind { expense, income, neutral }
 
+export enum EntryColumn { date, name, category, amount }
+
 export struct EntryRow {
+    // The entry's id, to refer back to it (e.g. when saving an edit).
+    id: string,
     date: string,
     name: string,
     category: string,
@@ -21,6 +25,11 @@ export component EntryLine inherits Rectangle {
     in property <length> flexible-width;
     // Space between the card's edge and its text; the header uses the same.
     in property <length> horizontal-padding;
+    // Greyed out and not interactive, e.g. while another line is being edited.
+    in property <bool> dimmed;
+
+    // With the column under the pointer.
+    callback double-clicked(EntryColumn);
 
     // Colours mix the theme's background with a hint of colour, so they suit light and dark
     // themes alike. Hovering mixes in a bit of the text colour: darker on light themes,
@@ -28,13 +37,15 @@ export component EntryLine inherits Rectangle {
     property <color> expense-tint: Palette.background.mix(#e53935, 0.92);
     property <color> income-tint: Palette.background.mix(#43a047, 0.92);
     property <color> neutral-tint: Palette.background.mix(Palette.foreground, 0.96);
-    property <color> tint: root.entry.kind == EntryKind.expense ? root.expense-tint
+    property <color> tint: root.dimmed ? root.neutral-tint
+        : root.entry.kind == EntryKind.expense ? root.expense-tint
         : root.entry.kind == EntryKind.income ? root.income-tint
         : root.neutral-tint;
 
     background: touch.has-hover ? root.tint.mix(Palette.foreground, 0.92) : root.tint;
     border-radius: 4px;
-    animate background { duration: 100ms; }
+    opacity: root.dimmed ? 0.4 : 1;
+    animate background, opacity { duration: 100ms; }
 
     HorizontalLayout {
         padding-left: root.horizontal-padding;
@@ -47,27 +58,38 @@ export component EntryLine inherits Rectangle {
             width: root.date-width;
             text: root.entry.date;
         }
-        Text {
+        name := Text {
             horizontal-stretch: 1;
             min-width: root.flexible-width;
             preferred-width: root.flexible-width;
             text: root.entry.name;
             overflow: elide;
         }
-        Text {
+        category := Text {
             horizontal-stretch: 1;
             min-width: root.flexible-width;
             preferred-width: root.flexible-width;
             text: root.entry.category;
             overflow: elide;
         }
-        Text {
+        amount := Text {
             width: root.amount-width;
             text: root.entry.amount;
             horizontal-alignment: right;
         }
     }
 
-    // Covers the whole line; clicks, double-clicks and context menus will hook in here.
-    touch := TouchArea {}
+    // Covers the whole line; clicks and context menus will hook in here too.
+    touch := TouchArea {
+        enabled: !root.dimmed;
+        double-clicked => {
+            // Columns start where their text starts; the spacing before one counts to the
+            // previous column.
+            root.double-clicked(
+                self.mouse-x < name.x ? EntryColumn.date
+                : self.mouse-x < category.x ? EntryColumn.name
+                : self.mouse-x < amount.x ? EntryColumn.category
+                : EntryColumn.amount);
+        }
+    }
 }

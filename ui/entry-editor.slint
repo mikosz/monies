@@ -1,0 +1,130 @@
+import { LineEdit } from "std-widgets.slint";
+import { EntriesStore } from "entries-store.slint";
+import { EntryColumn } from "entry-line.slint";
+import { PrefillLineEdit } from "prefill-line-edit.slint";
+import { SuggestionLineEdit } from "suggestion-line-edit.slint";
+
+// The input fields of an entry, used both for adding (the input row) and for editing a line in
+// place. Column sizes come from the page so the fields align with the list.
+//
+// Enter submits, Escape cancels; what that means is up to the owner. The date is prefilled with
+// the last entered date when focused while empty, and Up/Down move it by a day.
+export component EntryEditor {
+    in property <length> column-spacing;
+    in property <length> date-width;
+    in property <length> amount-width;
+    in property <length> flexible-width;
+    in property <bool> enabled: true;
+    // Tab and Shift+Tab cycle through the fields instead of leaving the editor.
+    in property <bool> trap-focus;
+
+    in-out property <string> date <=> date-input.text;
+    in-out property <string> name <=> name-input.text;
+    in-out property <string> category <=> category-input.text;
+    in-out property <string> amount <=> amount-input.text;
+
+    callback submitted();
+    callback cancelled();
+
+    // Focuses the field of `column` and selects its text, so typing replaces it.
+    public function focus-column(column: EntryColumn) {
+        if (column == EntryColumn.date) {
+            date-input.focus();
+            date-input.select-all();
+        } else if (column == EntryColumn.name) {
+            name-input.focus();
+            name-input.select-all();
+        } else if (column == EntryColumn.category) {
+            category-input.focus();
+            category-input.select-all();
+        } else {
+            amount-input.focus();
+            amount-input.select-all();
+        }
+    }
+
+    // Empties all fields and focuses the date, prefilled with the last entered date.
+    public function reset() {
+        date-input.text = "";
+        name-input.text = "";
+        category-input.text = "";
+        amount-input.text = "";
+        date-input.focus();
+        // Focus may not change (e.g. Enter pressed in the date input), so prefill explicitly.
+        date-input.prefill();
+    }
+
+    // Handles keys every field shares; `first`/`last` say where Tab would leave the editor.
+    function handle-key(event: KeyEvent, first: bool, last: bool) -> EventResult {
+        if (event.text == Key.Escape) {
+            root.cancelled();
+            return accept;
+        }
+        if (root.trap-focus) {
+            let backwards = event.text == Key.Backtab || (event.text == Key.Tab && event.modifiers.shift);
+            if (last && event.text == Key.Tab && !backwards) {
+                root.focus-column(EntryColumn.date);
+                return accept;
+            }
+            if (first && backwards) {
+                root.focus-column(EntryColumn.amount);
+                return accept;
+            }
+        }
+        return reject;
+    }
+
+    HorizontalLayout {
+        spacing: root.column-spacing;
+
+        date-input := PrefillLineEdit {
+            width: root.date-width;
+            enabled: root.enabled;
+            placeholder-text: EntriesStore.date-placeholder;
+            prefill-text: EntriesStore.last-date;
+            accepted => { root.submitted(); }
+            key-pressed(event) => {
+                // Up/Down move to the previous/next day.
+                if (event.text == Key.UpArrow || event.text == Key.DownArrow) {
+                    let shifted = EntriesStore.shift-date(self.text, event.text == Key.UpArrow ? -1 : 1);
+                    if (shifted != "") {
+                        self.text = shifted;
+                        self.select-all();
+                    }
+                    return accept;
+                }
+                return root.handle-key(event, true, false);
+            }
+        }
+        name-input := LineEdit {
+            horizontal-stretch: 1;
+            min-width: root.flexible-width;
+            preferred-width: root.flexible-width;
+            enabled: root.enabled;
+            placeholder-text: "Name";
+            accepted => { root.submitted(); }
+            key-pressed(event) => { return root.handle-key(event, false, false); }
+        }
+        category-input := SuggestionLineEdit {
+            horizontal-stretch: 1;
+            min-width: root.flexible-width;
+            preferred-width: root.flexible-width;
+            enabled: root.enabled;
+            placeholder-text: "Category, e.g. bills.rent";
+            suggestions: EntriesStore.category-suggestions;
+            // Picking a category continues with its subcategories.
+            pick-suffix: ".";
+            edited(text) => { EntriesStore.category-edited(text); }
+            accepted => { root.submitted(); }
+            key-pressed(event) => { return root.handle-key(event, false, false); }
+        }
+        amount-input := LineEdit {
+            width: root.amount-width;
+            enabled: root.enabled;
+            placeholder-text: "Amount";
+            horizontal-alignment: right;
+            accepted => { root.submitted(); }
+            key-pressed(event) => { return root.handle-key(event, false, true); }
+        }
+    }
+}

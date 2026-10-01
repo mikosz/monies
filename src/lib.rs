@@ -13,13 +13,14 @@ use std::cell::RefCell;
 use std::error::Error;
 use std::rc::Rc;
 
-use slint::{SharedString, VecModel};
+use slint::{Model, SharedString, VecModel};
+use uuid::Uuid;
 
 use category::Categories;
 use change::ChangeBuilder;
 use date_format::DateFormat;
 use document::Document;
-use entry::{format_amount, Entry, ParsedEntry};
+use entry::{format_amount, Entry, EntryId, ParsedEntry};
 use ledger::{EntryListUpdate, Ledger};
 use store::Store;
 
@@ -62,13 +63,16 @@ struct View {
     window: slint::Weak<MainWindow>,
     date_format: DateFormat,
     rows: Rc<VecModel<EntryRow>>,
-    /// Suggestions for the current text of the category input.
+    /// Suggestions for `category_query`.
     category_suggestions: Rc<VecModel<SharedString>>,
+    /// The text last reported by a category input (on focus or edit), i.e. of the one in use.
+    category_query: RefCell<String>,
 }
 
 impl View {
-    fn entry_row(&self, entry: &Entry, categories: &Categories) -> EntryRow {
+    fn entry_row(&self, id: EntryId, entry: &Entry, categories: &Categories) -> EntryRow {
         EntryRow {
+            id: id.0.to_string().into(),
             date: self.date_format.format(entry.date).into(),
             name: entry.name.as_str().into(),
             category: categories.path(entry.category).into(),
@@ -82,28 +86,31 @@ impl View {
     }
 
     fn show_ledger(&self, ledger: &Ledger) {
-        let rows: Vec<EntryRow> = ledger.entries().iter().map(|(_, e)| self.entry_row(e, ledger.categories())).collect();
-        self.rows.set_vec(rows);
+        let rows = ledger.entries().iter().map(|(id, entry)| self.entry_row(*id, entry, ledger.categories()));
+        self.rows.set_vec(rows.collect::<Vec<_>>());
         self.show_last_date(ledger);
-        self.suggest_categories(ledger, "");
+        self.suggest_categories(ledger);
     }
 
-    /// Updates what's shown after a change was applied. `category_text` is the text the
-    /// category input has (or is about to have).
-    fn update(&self, ledger: &Ledger, updates: &[EntryListUpdate], category_text: &str) {
+    /// Updates what's shown after a change was applied.
+    fn update(&self, ledger: &Ledger, updates: &[EntryListUpdate]) {
         for update in updates {
             match *update {
                 EntryListUpdate::Inserted { index, id } => {
                     let entry = ledger.entry(id).expect("inserted entry exists");
-                    self.rows.insert(index, self.entry_row(entry, ledger.categories()));
+                    self.rows.insert(index, self.entry_row(id, entry, ledger.categories()));
                 }
                 EntryListUpdate::Removed { index } => {
                     self.rows.remove(index);
                 }
+                EntryListUpdate::Updated { index } => {
+                    let (id, entry) = &ledger.entries()[index];
+                    self.rows.set_row_data(index, self.entry_row(*id, entry, ledger.categories()));
+                }
             }
         }
         self.show_last_date(ledger);
-        self.suggest_categories(ledger, category_text);
+        self.suggest_categories(ledger);
     }
 
     fn show_last_date(&self, ledger: &Ledger) {
@@ -116,13 +123,15 @@ impl View {
         self.entries_store(|store| store.set_last_date(self.date_format.format(date).into()));
     }
 
-    fn suggest_categories(&self, ledger: &Ledger, text: &str) {
-        let suggestions = ledger.categories().suggest(text).into_iter().map(SharedString::from);
-        self.category_suggestions.set_vec(suggestions.collect::<Vec<_>>());
+    fn query_categories(&self, ledger: &Ledger, text: &str) {
+        self.category_query.replace(text.to_owned());
+        self.suggest_categories(ledger);
     }
 
-    fn category_text(&self) -> SharedString {
-        self.entries_store(|store| store.get_category_text()).unwrap_or_default()
+    fn suggest_categories(&self, ledger: &Ledger) {
+        let suggestions = ledger.categories().suggest(&self.category_query.borrow());
+        let suggestions = suggestions.into_iter().map(SharedString::from);
+        self.category_suggestions.set_vec(suggestions.collect::<Vec<_>>());
     }
 
     fn entries_store<T>(&self, f: impl FnOnce(EntriesStore) -> T) -> Option<T> {
@@ -140,6 +149,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         date_format: DateFormat::system(),
         rows: Rc::new(VecModel::default()),
         category_suggestions: Rc::new(VecModel::default()),
+        category_query: RefCell::default(),
     });
     // The document is the source of truth; `view` mirrors it.
     view.show_ledger(&ledger);
@@ -162,7 +172,8 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             match document.perform(change.build()) {
                 Ok(updates) => {
                     // The inputs are cleared after a successful add.
-                    view.update(document.ledger(), &updates, "");
+                    view.category_query.replace(String::new());
+                    view.update(document.ledger(), &updates);
                     true
                 }
                 Err(error) => {
@@ -176,7 +187,36 @@ pub fn run() -> Result<(), Box<dyn Error>> {
 
     entries_store.on_category_edited({
         let (document, view) = (document.clone(), view.clone());
-        move |text| view.suggest_categories(document.borrow().ledger(), &text)
+        move |text| view.query_categories(document.borrow().ledger(), &text)
+    });
+
+    entries_store.on_update_entry({
+        let (document, view) = (document.clone(), view.clone());
+        move |id, date, name, category, amount| {
+            let Ok(id) = Uuid::parse_str(&id).map(EntryId) else { return false };
+            let Ok(parsed) = ParsedEntry::parse(&view.date_format, &date, &name, &category, &amount) else {
+                return false;
+            };
+            let mut document = document.borrow_mut();
+            let Some(current) = document.ledger().entry(id).cloned() else { return false };
+            let mut change = ChangeBuilder::new(format!("Edit entry ‘{}’", current.name), document.ledger().categories());
+            change.update_entry(id, &current, parsed);
+            let change = change.build();
+            if change.is_empty() {
+                return true;
+            }
+            match document.perform(change) {
+                Ok(updates) => {
+                    view.update(document.ledger(), &updates);
+                    true
+                }
+                Err(error) => {
+                    // TODO: show storage errors in the UI.
+                    eprintln!("Failed to save entry: {error}");
+                    false
+                }
+            }
+        }
     });
 
     entries_store.on_shift_date({
@@ -193,7 +233,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         move || {
             let mut document = document.borrow_mut();
             match document.undo() {
-                Ok(Some(updates)) => view.update(document.ledger(), &updates, &view.category_text()),
+                Ok(Some(updates)) => view.update(document.ledger(), &updates),
                 Ok(None) => {}
                 Err(error) => eprintln!("Failed to undo: {error}"),
             }
@@ -202,7 +242,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     undo_redo.on_redo(move || {
         let mut document = document.borrow_mut();
         match document.redo() {
-            Ok(Some(updates)) => view.update(document.ledger(), &updates, &view.category_text()),
+            Ok(Some(updates)) => view.update(document.ledger(), &updates),
             Ok(None) => {}
             Err(error) => eprintln!("Failed to redo: {error}"),
         }
