@@ -1,8 +1,9 @@
 import { HorizontalBox } from "std-widgets.slint";
 import { SideBar } from "side-bar.slint";
 import { EntriesPage, EntriesStore, EntryKind, EntryRow, RowType } from "entries-page.slint";
+import { AccountRow, SettingsPage, SettingsStore } from "settings-page.slint";
 
-export { EntriesStore, EntryKind, EntryRow, RowType }
+export { AccountRow, EntriesStore, EntryKind, EntryRow, RowType, SettingsStore }
 
 // Undo/redo of changes to the data (not of text being typed in a field).
 export global UndoRedo {
@@ -13,6 +14,26 @@ export global UndoRedo {
 export component MainWindow inherits Window {
     title: "Monies!";
 
+    // Index of the settings page in the side bar.
+    property <int> settings-page: 2;
+    // While an entry or account is edited, or a deletion awaits confirmation, undo/redo and
+    // switching pages are off.
+    property <bool> modal: EntriesStore.editing-id != "" || SettingsStore.editing-id != ""
+        || SettingsStore.deleting-id != "";
+    property <bool> has-accounts: SettingsStore.has-accounts;
+
+    // Without accounts the other pages are of no use: entries can't be added.
+    changed has-accounts => {
+        if (!self.has-accounts) {
+            root.show-settings();
+        }
+    }
+
+    // Switches to the settings page, e.g. to add the first account.
+    public function show-settings() {
+        side-bar.current-item = root.settings-page;
+    }
+
     // Intercepts the shortcuts before the focused element (e.g. a LineEdit with its own text
     // undo) sees them. Never takes focus itself.
     FocusScope {
@@ -20,8 +41,8 @@ export component MainWindow inherits Window {
         focus-on-tab-navigation: false;
 
         capture-key-pressed(event) => {
-            // Undo/redo is off while an entry is edited; the fields then get the keys instead.
-            if (event.modifiers.control && !event.modifiers.alt && EntriesStore.editing-id == "") {
+            // Undo/redo is off while editing; the fields then get the keys instead.
+            if (event.modifiers.control && !event.modifiers.alt && !root.modal) {
                 if (event.text == "z" || event.text == "Z") {
                     if (event.modifiers.shift) {
                         UndoRedo.redo();
@@ -41,12 +62,14 @@ export component MainWindow inherits Window {
         HorizontalLayout {
             side-bar := SideBar {
 //                title: "How do I hide this label?";
-                model: ["Entries", "Summary"];
+                model: ["Entries", "Summary", "Settings"];
+                enabled-items: [root.has-accounts, root.has-accounts, true];
                 // Editing is modal: pages can't be switched meanwhile.
-                enabled: EntriesStore.editing-id == "";
+                enabled: !root.modal;
             }
 
             if(side-bar.current-item == 0) : EntriesPage {}
+            if(side-bar.current-item == root.settings-page) : SettingsPage {}
         }
     }
 }

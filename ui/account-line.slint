@@ -1,0 +1,78 @@
+import { Palette } from "std-widgets.slint";
+
+export struct AccountRow {
+    // The account's id, to refer back to it (e.g. when saving an edit).
+    id: string,
+    name: string,
+    // ISO 4217 code, e.g. "PLN".
+    currency: string,
+    // Number of the account's entries.
+    entries: int,
+    // In the trash: hidden, but can be restored.
+    deleted: bool,
+}
+
+// One account in a list, drawn as a card like the lines of entries. Its children (e.g. buttons
+// for actions) are shown at the end of the line. Column sizes come from the page so lines
+// align with each other and the input row.
+export component AccountLine inherits Rectangle {
+    in property <AccountRow> account;
+    in property <length> column-spacing;
+    in property <length> currency-width;
+    in property <length> entries-width;
+    // Width of the children at the end of the line.
+    in property <length> actions-width;
+    // Space between the card's edge and its text.
+    in property <length> horizontal-padding;
+    // Greyed out and not interactive, e.g. while another line is being edited.
+    in property <bool> dimmed;
+
+    callback double-clicked();
+
+    // Same colours as neutral entry lines, see `EntryLine`.
+    property <color> tint: Palette.background.mix(Palette.foreground, 0.96);
+
+    background: touch.has-hover ? root.tint.mix(Palette.foreground, 0.92) : root.tint;
+    border-radius: 4px;
+    opacity: root.dimmed ? 0.4 : 1;
+    animate background, opacity { duration: 100ms; }
+
+    // Below the contents, so the children get their own clicks.
+    touch := TouchArea {
+        enabled: !root.dimmed;
+        double-clicked => { root.double-clicked(); }
+    }
+
+    HorizontalLayout {
+        padding-left: root.horizontal-padding;
+        padding-right: root.horizontal-padding;
+        padding-top: 3px;
+        padding-bottom: 3px;
+        spacing: root.column-spacing;
+
+        Text {
+            horizontal-stretch: 1;
+            text: root.account.name;
+            overflow: elide;
+            vertical-alignment: center;
+        }
+        Text {
+            width: root.currency-width;
+            text: root.account.currency;
+            vertical-alignment: center;
+        }
+        Text {
+            width: root.entries-width;
+            text: root.account.entries == 1 ? "1 entry" : "\{root.account.entries} entries";
+            horizontal-alignment: right;
+            vertical-alignment: center;
+        }
+        HorizontalLayout {
+            width: root.actions-width;
+            alignment: end;
+            spacing: 4px;
+
+            @children
+        }
+    }
+}

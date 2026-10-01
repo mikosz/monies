@@ -52,15 +52,24 @@ impl<S: Store> Document<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::account::AccountId;
     use crate::change::ChangeBuilder;
     use crate::date_format::DateFormat;
     use crate::entry::ParsedEntry;
     use crate::store::MemoryStore;
 
-    fn add(document: &mut Document<MemoryStore>, name: &str) {
-        let mut builder = ChangeBuilder::new(format!("Add {name}"), document.ledger().categories());
-        builder.add_entry(ParsedEntry::parse(&DateFormat::iso(), "2026-09-30", name, "bills", "1").unwrap());
-        document.perform(builder.build()).unwrap();
+    /// A ledger with one account, and that account.
+    fn ledger() -> (Ledger, AccountId) {
+        let mut ledger = Ledger::default();
+        let account = ledger.add_test_account("Cash");
+        (ledger, account)
+    }
+
+    fn add<S: Store>(document: &mut Document<S>, account: AccountId, name: &str) -> Result<(), S::Error> {
+        let mut builder = ChangeBuilder::new(format!("Add {name}"), document.ledger());
+        builder.add_entry(ParsedEntry::parse(&DateFormat::iso(), 2, "2026-09-30", name, "bills", "1").unwrap(), account);
+        let change = builder.build();
+        document.perform(change)
     }
 
     fn names(document: &Document<MemoryStore>) -> Vec<&str> {
@@ -69,9 +78,10 @@ mod tests {
 
     #[test]
     fn undoes_and_redoes_changes() {
-        let mut document = Document::new(Ledger::default(), MemoryStore);
-        add(&mut document, "a");
-        add(&mut document, "b");
+        let (ledger, account) = ledger();
+        let mut document = Document::new(ledger, MemoryStore);
+        add(&mut document, account, "a").unwrap();
+        add(&mut document, account, "b").unwrap();
 
         assert!(document.undo().unwrap());
         assert_eq!(names(&document), ["a"]);
@@ -87,10 +97,11 @@ mod tests {
 
     #[test]
     fn new_change_discards_redo() {
-        let mut document = Document::new(Ledger::default(), MemoryStore);
-        add(&mut document, "a");
+        let (ledger, account) = ledger();
+        let mut document = Document::new(ledger, MemoryStore);
+        add(&mut document, account, "a").unwrap();
         document.undo().unwrap();
-        add(&mut document, "b");
+        add(&mut document, account, "b").unwrap();
 
         assert!(!document.redo().unwrap());
         assert_eq!(names(&document), ["b"]);
@@ -111,10 +122,9 @@ mod tests {
 
     #[test]
     fn failed_undo_and_redo_change_nothing() {
-        let mut document = Document::new(Ledger::default(), FlakyStore { failing: false });
-        let mut builder = ChangeBuilder::new("Add", document.ledger().categories());
-        builder.add_entry(ParsedEntry::parse(&DateFormat::iso(), "2026-09-30", "a", "bills", "1").unwrap());
-        document.perform(builder.build()).unwrap();
+        let (ledger, account) = ledger();
+        let mut document = Document::new(ledger, FlakyStore { failing: false });
+        add(&mut document, account, "a").unwrap();
 
         document.store.failing = true;
         assert!(document.undo().is_err());

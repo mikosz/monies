@@ -1,0 +1,75 @@
+import { LineEdit } from "std-widgets.slint";
+import { SettingsStore } from "settings-store.slint";
+import { SuggestionLineEdit } from "suggestion-line-edit.slint";
+
+// The input fields of an account, shown in place of a line while it's edited or added. Column
+// sizes come from the page so the fields align with the list.
+//
+// Enter submits, Escape cancels; what that means is up to the owner. Tab and Shift+Tab move
+// between the fields without leaving the editor.
+export component AccountEditor {
+    in property <length> column-spacing;
+    in property <length> currency-width;
+    // Space left after the fields, where account lines show their other columns.
+    in property <length> trailing-width;
+
+    in-out property <string> name <=> name-input.text;
+    in-out property <string> currency <=> currency-input.text;
+
+    callback submitted();
+    callback cancelled();
+
+    // Focuses the name and selects it, so typing replaces it.
+    public function focus-name() {
+        name-input.focus();
+        name-input.select-all();
+    }
+
+    // Empties the fields and focuses the name.
+    public function reset() {
+        name-input.text = "";
+        currency-input.text = "";
+        name-input.focus();
+    }
+
+    // Handles keys both fields share; with only two fields, Tab in either direction moves to
+    // the other one.
+    function handle-key(event: KeyEvent, in-name: bool) -> EventResult {
+        if (event.text == Key.Escape) {
+            root.cancelled();
+            return accept;
+        }
+        if (event.text == Key.Tab || event.text == Key.Backtab) {
+            if (in-name) {
+                currency-input.focus();
+                currency-input.select-all();
+            } else {
+                root.focus-name();
+            }
+            return accept;
+        }
+        return reject;
+    }
+
+    HorizontalLayout {
+        spacing: root.column-spacing;
+
+        name-input := LineEdit {
+            horizontal-stretch: 1;
+            placeholder-text: "Name";
+            accepted => { root.submitted(); }
+            key-pressed(event) => { return root.handle-key(event, true); }
+        }
+        currency-input := SuggestionLineEdit {
+            width: root.currency-width;
+            placeholder-text: "Currency";
+            suggestions: SettingsStore.currency-suggestions;
+            edited(text) => { SettingsStore.currency-edited(text); }
+            accepted => { root.submitted(); }
+            key-pressed(event) => { return root.handle-key(event, false); }
+        }
+        Rectangle {
+            width: root.trailing-width;
+        }
+    }
+}

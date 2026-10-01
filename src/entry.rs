@@ -3,6 +3,7 @@ use std::fmt;
 use chrono::NaiveDate;
 use uuid::Uuid;
 
+use crate::account::AccountId;
 use crate::category::{CategoryId, CategoryPath};
 use crate::date_format::DateFormat;
 
@@ -18,10 +19,12 @@ impl EntryId {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
+    pub account: AccountId,
     pub date: NaiveDate,
     pub name: String,
     pub category: CategoryId,
-    /// Amount in minor units (cents): positive for expenses, negative for income.
+    /// Amount in minor units of the account's currency (e.g. cents): positive for expenses,
+    /// negative for income.
     pub amount: i64,
 }
 
@@ -50,7 +53,7 @@ pub struct ParsedEntry {
     pub date: NaiveDate,
     pub name: String,
     pub category: CategoryPath,
-    /// Amount in minor units (cents). Negative values are allowed.
+    /// Amount in minor units (e.g. cents). Negative values are allowed.
     pub amount: i64,
 }
 
@@ -68,7 +71,9 @@ impl fmt::Display for EntryError {
             EntryError::InvalidDate => write!(f, "date is not in the expected format"),
             EntryError::EmptyName => write!(f, "name must not be empty"),
             EntryError::EmptyCategory => write!(f, "category must not be empty"),
-            EntryError::InvalidAmount => write!(f, "amount must be a number with at most two decimal places"),
+            EntryError::InvalidAmount => {
+                write!(f, "amount must be a number with at most as many decimal places as its currency has")
+            }
         }
     }
 }
@@ -76,9 +81,11 @@ impl fmt::Display for EntryError {
 impl std::error::Error for EntryError {}
 
 impl ParsedEntry {
-    /// Validates raw user input. Surrounding whitespace is ignored.
+    /// Validates raw user input; `decimals` is the number of decimal places of the amount's
+    /// currency. Surrounding whitespace is ignored.
     pub fn parse(
         date_format: &DateFormat,
+        decimals: u32,
         date: &str,
         name: &str,
         category: &str,
@@ -92,7 +99,7 @@ impl ParsedEntry {
         }
 
         let category = CategoryPath::parse(category).ok_or(EntryError::EmptyCategory)?;
-        let amount = parse_amount(amount)?;
+        let amount = parse_amount(amount, decimals)?;
 
         Ok(Self {
             date,
@@ -103,8 +110,10 @@ impl ParsedEntry {
     }
 }
 
-/// Parses a decimal amount such as `12`, `-12.5` or `+12.50` into cents.
-pub fn parse_amount(input: &str) -> Result<i64, EntryError> {
+/// Parses a decimal amount such as `12`, `-12.5` or `+12.50` into minor units, of which there
+/// are `10^decimals` in a unit (e.g. 100 cents for 2). At most `decimals` decimal places are
+/// allowed.
+pub fn parse_amount(input: &str, decimals: u32) -> Result<i64, EntryError> {
     let input = input.trim();
     let (negative, unsigned) = match input.strip_prefix('-') {
         Some(rest) => (true, rest),
@@ -120,29 +129,34 @@ pub fn parse_amount(input: &str) -> Result<i64, EntryError> {
         return Err(EntryError::InvalidAmount);
     }
 
-    let cents = match fraction {
+    let minor = match fraction {
         None => 0,
-        Some(fraction) if is_digits(fraction) && fraction.len() <= 2 => {
+        Some(fraction) if is_digits(fraction) && fraction.len() <= decimals as usize => {
             let value: i64 = fraction.parse().map_err(|_| EntryError::InvalidAmount)?;
-            if fraction.len() == 1 { value * 10 } else { value }
+            // Pad to `decimals` places, e.g. `.5` is 50 cents.
+            value * 10_i64.pow(decimals - fraction.len() as u32)
         }
         Some(_) => return Err(EntryError::InvalidAmount),
     };
 
     let whole: i64 = whole.parse().map_err(|_| EntryError::InvalidAmount)?;
     let total = whole
-        .checked_mul(100)
-        .and_then(|whole| whole.checked_add(cents))
+        .checked_mul(10_i64.pow(decimals))
+        .and_then(|whole| whole.checked_add(minor))
         .ok_or(EntryError::InvalidAmount)?;
 
     Ok(if negative { -total } else { total })
 }
 
-/// Formats cents as a decimal amount with exactly two decimal places.
-pub fn format_amount(amount: i64) -> String {
+/// Formats minor units as a decimal amount with exactly `decimals` decimal places.
+pub fn format_amount(amount: i64, decimals: u32) -> String {
     let sign = if amount < 0 { "-" } else { "" };
     let abs = amount.unsigned_abs();
-    format!("{sign}{}.{:02}", abs / 100, abs % 100)
+    if decimals == 0 {
+        return format!("{sign}{abs}");
+    }
+    let scale = 10_u64.pow(decimals);
+    format!("{sign}{}.{:0width$}", abs / scale, abs % scale, width = decimals as usize)
 }
 
 #[cfg(test)]
@@ -150,7 +164,7 @@ mod tests {
     use super::*;
 
     fn parse(date: &str, name: &str, category: &str, amount: &str) -> Result<ParsedEntry, EntryError> {
-        ParsedEntry::parse(&DateFormat::iso(), date, name, category, amount)
+        ParsedEntry::parse(&DateFormat::iso(), 2, date, name, category, amount)
     }
 
     #[test]
@@ -182,36 +196,68 @@ mod tests {
 
     #[test]
     fn parses_amounts() {
-        assert_eq!(parse_amount("12"), Ok(1200));
-        assert_eq!(parse_amount("12.5"), Ok(1250));
-        assert_eq!(parse_amount("12.05"), Ok(1205));
-        assert_eq!(parse_amount("-12.50"), Ok(-1250));
-        assert_eq!(parse_amount("+0.01"), Ok(1));
-        assert_eq!(parse_amount(" 7 "), Ok(700));
+        assert_eq!(parse_amount("12", 2), Ok(1200));
+        assert_eq!(parse_amount("12.5", 2), Ok(1250));
+        assert_eq!(parse_amount("12.05", 2), Ok(1205));
+        assert_eq!(parse_amount("-12.50", 2), Ok(-1250));
+        assert_eq!(parse_amount("+0.01", 2), Ok(1));
+        assert_eq!(parse_amount(" 7 ", 2), Ok(700));
     }
 
     #[test]
     fn rejects_invalid_amounts() {
         for input in ["", "-", "abc", "1.", ".5", "1.234", "1,50", "--1", "1.-5", "99999999999999999999"] {
-            assert_eq!(parse_amount(input), Err(EntryError::InvalidAmount), "input: {input:?}");
+            assert_eq!(parse_amount(input, 2), Err(EntryError::InvalidAmount), "input: {input:?}");
         }
     }
 
     #[test]
+    fn parses_amounts_without_decimals() {
+        assert_eq!(parse_amount("1200", 0), Ok(1200));
+        assert_eq!(parse_amount("-5", 0), Ok(-5));
+        for input in ["1.5", "1.0", "1."] {
+            assert_eq!(parse_amount(input, 0), Err(EntryError::InvalidAmount), "input: {input:?}");
+        }
+    }
+
+    #[test]
+    fn parses_amounts_with_three_decimals() {
+        assert_eq!(parse_amount("12", 3), Ok(12000));
+        assert_eq!(parse_amount("12.5", 3), Ok(12500));
+        assert_eq!(parse_amount("12.05", 3), Ok(12050));
+        assert_eq!(parse_amount("-0.001", 3), Ok(-1));
+        assert_eq!(parse_amount("1.2345", 3), Err(EntryError::InvalidAmount));
+    }
+
+    #[test]
     fn formats_amounts() {
-        assert_eq!(format_amount(0), "0.00");
-        assert_eq!(format_amount(5), "0.05");
-        assert_eq!(format_amount(1250), "12.50");
-        assert_eq!(format_amount(-1250), "-12.50");
-        assert_eq!(format_amount(-5), "-0.05");
-        assert_eq!(format_amount(i64::MIN), "-92233720368547758.08");
+        assert_eq!(format_amount(0, 2), "0.00");
+        assert_eq!(format_amount(5, 2), "0.05");
+        assert_eq!(format_amount(1250, 2), "12.50");
+        assert_eq!(format_amount(-1250, 2), "-12.50");
+        assert_eq!(format_amount(-5, 2), "-0.05");
+        assert_eq!(format_amount(i64::MIN, 2), "-92233720368547758.08");
+    }
+
+    #[test]
+    fn formats_amounts_with_other_decimals() {
+        assert_eq!(format_amount(0, 0), "0");
+        assert_eq!(format_amount(-1250, 0), "-1250");
+        assert_eq!(format_amount(5, 3), "0.005");
+        assert_eq!(format_amount(-12500, 3), "-12.500");
     }
 
     #[test]
     fn expenses_are_positive_and_income_negative() {
         let kind = |amount| {
             let parsed = parse("2026-09-30", "a", "c", amount).unwrap();
-            let entry = Entry { date: parsed.date, name: parsed.name, category: CategoryId::generate(), amount: parsed.amount };
+            let entry = Entry {
+                account: AccountId::generate(),
+                date: parsed.date,
+                name: parsed.name,
+                category: CategoryId::generate(),
+                amount: parsed.amount,
+            };
             entry.kind()
         };
         assert_eq!(kind("12.50"), EntryKind::Expense);

@@ -11,12 +11,11 @@ pub trait Store {
     fn apply(&mut self, change: &Change) -> Result<(), Self::Error>;
 }
 
-/// Stores nothing. Used where there's no database (the browser) and in tests.
-#[cfg(any(test, target_arch = "wasm32"))]
+/// Stores nothing. Used where there's no database (the browser), for changes that are only
+/// staged in memory (see `DatabaseWriter`) and in tests.
 #[derive(Debug, Default)]
 pub struct MemoryStore;
 
-#[cfg(any(test, target_arch = "wasm32"))]
 impl Store for MemoryStore {
     type Error = std::convert::Infallible;
 

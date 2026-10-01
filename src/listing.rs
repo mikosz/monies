@@ -18,9 +18,9 @@ pub enum ListItem<'a> {
 }
 
 /// Entries by date, those on the same day in the order they were entered, each period preceded
-/// by its start.
+/// by its start. Entries of deleted accounts are left out.
 pub fn list_items(ledger: &Ledger) -> Vec<ListItem<'_>> {
-    let mut entries: Vec<_> = ledger.entries().iter().collect();
+    let mut entries: Vec<_> = ledger.visible_entries().collect();
     // The ledger is in the order entries were entered, and this sort is stable.
     entries.sort_by_key(|(_, entry)| entry.date);
 
@@ -84,10 +84,12 @@ mod tests {
 
     fn ledger(entries: &[(&str, &str)]) -> Ledger {
         let mut ledger = Ledger::default();
+        let account = ledger.add_test_account("Cash");
         for (date, name) in entries {
-            let mut builder = ChangeBuilder::new("Add", ledger.categories());
-            builder.add_entry(ParsedEntry::parse(&DateFormat::iso(), date, name, "bills", "1").unwrap());
-            ledger.apply(&mut MemoryStore, &builder.build()).unwrap();
+            let mut builder = ChangeBuilder::new("Add", &ledger);
+            builder.add_entry(ParsedEntry::parse(&DateFormat::iso(), 2, date, name, "bills", "1").unwrap(), account);
+            let change = builder.build();
+            ledger.apply(&mut MemoryStore, &change).unwrap();
         }
         ledger
     }
@@ -129,6 +131,19 @@ mod tests {
     #[test]
     fn empty_ledger_has_no_items() {
         assert!(list_items(&Ledger::default()).is_empty());
+    }
+
+    #[test]
+    fn leaves_out_entries_of_deleted_accounts() {
+        let mut ledger = ledger(&[("2026-04-10", "cash")]);
+        let bank = ledger.add_test_account("Bank");
+        let mut builder = ChangeBuilder::new("Add", &ledger);
+        builder.add_entry(ParsedEntry::parse(&DateFormat::iso(), 2, "2026-05-02", "bank", "bills", "1").unwrap(), bank);
+        builder.delete_account(bank);
+        let change = builder.build();
+        ledger.apply(&mut MemoryStore, &change).unwrap();
+
+        assert_eq!(describe(&list_items(&ledger)), ["== 2026-04-01", "cash"], "nor is May shown");
     }
 
     #[test]

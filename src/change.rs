@@ -1,10 +1,17 @@
+use crate::account::{Account, AccountError, AccountId, Accounts};
 use crate::category::{Categories, CategoryId, CategoryPath};
+use crate::currency::Currency;
 use crate::entry::{Entry, EntryId, ParsedEntry};
+use crate::ledger::Ledger;
 
 /// A primitive modification of the ledger. Every operation carries enough data to be
 /// reversed, see [`Op::inverse`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Op {
+    InsertAccount { id: AccountId, account: Account },
+    /// Also moves an account to the trash and back, see [`Account::deleted`].
+    UpdateAccount { id: AccountId, before: Account, after: Account },
+    DeleteAccount { id: AccountId, account: Account },
     InsertCategory { id: CategoryId, name: String, parent: Option<CategoryId> },
     DeleteCategory { id: CategoryId, name: String, parent: Option<CategoryId> },
     InsertEntry { id: EntryId, entry: Entry },
@@ -15,6 +22,9 @@ pub enum Op {
 impl Op {
     pub fn inverse(&self) -> Op {
         match self.clone() {
+            Op::InsertAccount { id, account } => Op::DeleteAccount { id, account },
+            Op::UpdateAccount { id, before, after } => Op::UpdateAccount { id, before: after, after: before },
+            Op::DeleteAccount { id, account } => Op::InsertAccount { id, account },
             Op::InsertCategory { id, name, parent } => Op::DeleteCategory { id, name, parent },
             Op::DeleteCategory { id, name, parent } => Op::InsertCategory { id, name, parent },
             Op::InsertEntry { id, entry } => Op::DeleteEntry { id, entry },
@@ -47,35 +57,91 @@ impl Change {
     }
 }
 
-/// Builds a [`Change`] against the current categories, creating missing ones. Categories
-/// created earlier in the same change are reused, so e.g. importing many entries into a new
-/// category creates it once.
-pub struct ChangeBuilder {
+/// Builds a [`Change`] against the ledger, validating it and creating missing categories.
+/// Categories and accounts created or changed earlier in the same change are taken into
+/// account, so e.g. importing many entries into a new category creates it once. Entries are
+/// always those of the ledger, without the ones added by the change.
+pub struct ChangeBuilder<'a> {
     description: String,
+    ledger: &'a Ledger,
+    /// The current accounts as changed by this change so far.
+    accounts: Accounts,
     /// The current categories plus those created by this change so far.
     categories: Categories,
     ops: Vec<Op>,
 }
 
-impl ChangeBuilder {
-    pub fn new(description: impl Into<String>, categories: &Categories) -> Self {
-        Self { description: description.into(), categories: categories.clone(), ops: Vec::new() }
+impl<'a> ChangeBuilder<'a> {
+    pub fn new(description: impl Into<String>, ledger: &'a Ledger) -> Self {
+        Self {
+            description: description.into(),
+            ledger,
+            accounts: ledger.accounts().clone(),
+            categories: ledger.categories().clone(),
+            ops: Vec::new(),
+        }
     }
 
-    pub fn add_entry(&mut self, parsed: ParsedEntry) -> EntryId {
+    /// Adds an account with a name not used by any other account, deleted ones included.
+    pub fn add_account(&mut self, name: &str, currency: Currency) -> Result<AccountId, AccountError> {
+        let id = AccountId::generate();
+        let account = Account { name: self.account_name(name, id)?, currency, deleted: false };
+        self.accounts.insert(id, account.clone());
+        self.ops.push(Op::InsertAccount { id, account });
+        Ok(id)
+    }
+
+    /// Renames the account or changes its currency; the latter only while it has no entries.
+    /// Records nothing when neither changes. Panics if there's no such account.
+    pub fn update_account(&mut self, id: AccountId, name: &str, currency: Currency) -> Result<(), AccountError> {
+        let current = self.account(id);
+        let name = self.account_name(name, id)?;
+        if currency != current.currency && self.ledger.account_entries(id).next().is_some() {
+            return Err(AccountError::CurrencyInUse);
+        }
+        self.set_account(id, current.clone(), Account { name, currency, ..current });
+        Ok(())
+    }
+
+    /// Moves the account to the trash. Panics if there's no such account.
+    pub fn delete_account(&mut self, id: AccountId) {
+        let current = self.account(id);
+        self.set_account(id, current.clone(), Account { deleted: true, ..current });
+    }
+
+    /// Brings the account back from the trash. Panics if there's no such account.
+    pub fn restore_account(&mut self, id: AccountId) {
+        let current = self.account(id);
+        self.set_account(id, current.clone(), Account { deleted: false, ..current });
+    }
+
+    /// Deletes the account and all its entries. Categories are kept, even if no longer used.
+    /// Panics if there's no such account.
+    pub fn delete_account_permanently(&mut self, id: AccountId) {
+        let account = self.account(id);
+        let ledger = self.ledger;
+        for (entry_id, entry) in ledger.account_entries(id) {
+            self.ops.push(Op::DeleteEntry { id: *entry_id, entry: entry.clone() });
+        }
+        self.accounts.remove(id);
+        self.ops.push(Op::DeleteAccount { id, account });
+    }
+
+    /// Adds an entry to the account, whose currency `parsed.amount` is in.
+    pub fn add_entry(&mut self, parsed: ParsedEntry, account: AccountId) -> EntryId {
         let category = self.category(&parsed.category);
         let id = EntryId::generate();
-        let entry = Entry { date: parsed.date, name: parsed.name, category, amount: parsed.amount };
+        let entry = Entry { account, date: parsed.date, name: parsed.name, category, amount: parsed.amount };
         self.ops.push(Op::InsertEntry { id, entry });
         id
     }
 
     /// Replaces the entry `id`, currently `current`, with the parsed input. Records nothing
-    /// when the input doesn't change the entry.
+    /// when the input doesn't change the entry. The entry stays in its account.
     pub fn update_entry(&mut self, id: EntryId, current: &Entry, parsed: ParsedEntry) {
         // An unchanged entry keeps its existing category, so no categories are created then.
         let category = self.category(&parsed.category);
-        let after = Entry { date: parsed.date, name: parsed.name, category, amount: parsed.amount };
+        let after = Entry { account: current.account, date: parsed.date, name: parsed.name, category, amount: parsed.amount };
         if after != *current {
             self.ops.push(Op::UpdateEntry { id, before: current.clone(), after });
         }
@@ -83,6 +149,29 @@ impl ChangeBuilder {
 
     pub fn build(self) -> Change {
         Change { description: self.description, ops: self.ops }
+    }
+
+    fn account(&self, id: AccountId) -> Account {
+        self.accounts.get(id).expect("changed account exists").clone()
+    }
+
+    /// The trimmed name, if it isn't empty and no account other than `id` has it.
+    fn account_name(&self, name: &str, id: AccountId) -> Result<String, AccountError> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(AccountError::EmptyName);
+        }
+        match self.accounts.find(name) {
+            Some(other) if other != id => Err(AccountError::DuplicateName),
+            _ => Ok(name.to_owned()),
+        }
+    }
+
+    fn set_account(&mut self, id: AccountId, before: Account, after: Account) {
+        if after != before {
+            self.accounts.replace(id, after.clone());
+            self.ops.push(Op::UpdateAccount { id, before, after });
+        }
     }
 
     /// The category at `path`, creating it and any missing ancestors.
@@ -103,9 +192,18 @@ impl ChangeBuilder {
 mod tests {
     use super::*;
     use crate::date_format::DateFormat;
+    use crate::store::MemoryStore;
 
     fn parsed(category: &str) -> ParsedEntry {
-        ParsedEntry::parse(&DateFormat::iso(), "2026-09-30", "Rent", category, "1").unwrap()
+        ParsedEntry::parse(&DateFormat::iso(), 2, "2026-09-30", "Rent", category, "1").unwrap()
+    }
+
+    fn ledger_with(categories: Categories) -> Ledger {
+        Ledger::new(Accounts::default(), categories, Vec::new())
+    }
+
+    fn currency(code: &str) -> Currency {
+        Currency::parse(code).unwrap()
     }
 
     fn inserted_categories(change: &Change) -> Vec<&str> {
@@ -121,8 +219,10 @@ mod tests {
 
     #[test]
     fn creates_missing_categories_before_the_entry() {
-        let mut builder = ChangeBuilder::new("Add", &Categories::default());
-        builder.add_entry(parsed("bills.rent"));
+        let account = AccountId::generate();
+        let ledger = Ledger::default();
+        let mut builder = ChangeBuilder::new("Add", &ledger);
+        builder.add_entry(parsed("bills.rent"), account);
         let change = builder.build();
 
         assert_eq!(inserted_categories(&change), ["bills", "rent"]);
@@ -133,6 +233,7 @@ mod tests {
         };
         assert_eq!(*parent, Some(*bills));
         assert_eq!(entry.category, *rent);
+        assert_eq!(entry.account, account);
     }
 
     #[test]
@@ -140,11 +241,13 @@ mod tests {
         let mut existing = Categories::default();
         let bills = CategoryId::generate();
         existing.insert(bills, "Bills".to_owned(), None);
+        let ledger = ledger_with(existing);
+        let account = AccountId::generate();
 
-        let mut builder = ChangeBuilder::new("Import", &existing);
-        builder.add_entry(parsed("bills.rent"));
-        builder.add_entry(parsed("BILLS.Rent"));
-        builder.add_entry(parsed("bills"));
+        let mut builder = ChangeBuilder::new("Import", &ledger);
+        builder.add_entry(parsed("bills.rent"), account);
+        builder.add_entry(parsed("BILLS.Rent"), account);
+        builder.add_entry(parsed("bills"), account);
         let change = builder.build();
 
         assert_eq!(inserted_categories(&change), ["rent"]);
@@ -158,20 +261,23 @@ mod tests {
             .collect();
         assert_eq!(categories[0], categories[1]);
         assert_eq!(categories[2], bills);
-        assert_eq!(existing.find(&CategoryPath::parse("bills.rent").unwrap()), None, "input categories are untouched");
+        let rent = CategoryPath::parse("bills.rent").unwrap();
+        assert_eq!(ledger.categories().find(&rent), None, "the ledger's categories are untouched");
     }
 
     #[test]
     fn entry_ids_follow_creation_order() {
-        let mut builder = ChangeBuilder::new("Import", &Categories::default());
-        let ids: Vec<EntryId> = (0..100).map(|_| builder.add_entry(parsed("bills"))).collect();
+        let (ledger, account) = (Ledger::default(), AccountId::generate());
+        let mut builder = ChangeBuilder::new("Import", &ledger);
+        let ids: Vec<EntryId> = (0..100).map(|_| builder.add_entry(parsed("bills"), account)).collect();
         assert!(ids.is_sorted());
     }
 
     #[test]
     fn inverse_reverses_and_inverts_operations() {
-        let mut builder = ChangeBuilder::new("Add", &Categories::default());
-        builder.add_entry(parsed("bills.rent"));
+        let ledger = Ledger::default();
+        let mut builder = ChangeBuilder::new("Add", &ledger);
+        builder.add_entry(parsed("bills.rent"), AccountId::generate());
         let change = builder.build();
         let inverse = change.inverse();
 
@@ -184,7 +290,7 @@ mod tests {
 
     fn entry(categories: &Categories, category: &str, amount: i64) -> Entry {
         let category = categories.find(&CategoryPath::parse(category).unwrap()).unwrap();
-        Entry { date: parsed("x").date, name: "Rent".to_owned(), category, amount }
+        Entry { account: AccountId::generate(), date: parsed("x").date, name: "Rent".to_owned(), category, amount }
     }
 
     #[test]
@@ -192,9 +298,10 @@ mod tests {
         let mut categories = Categories::default();
         categories.insert(CategoryId::generate(), "bills".to_owned(), None);
         let current = entry(&categories, "bills", 100);
+        let ledger = ledger_with(categories);
 
         let id = EntryId::generate();
-        let mut builder = ChangeBuilder::new("Edit", &categories);
+        let mut builder = ChangeBuilder::new("Edit", &ledger);
         builder.update_entry(id, &current, parsed("bills.rent"));
         let change = builder.build();
 
@@ -205,6 +312,7 @@ mod tests {
         assert_eq!((*updated, before), (id, &current));
         assert_ne!(after.category, current.category);
         assert_eq!(after.amount, 100);
+        assert_eq!(after.account, current.account, "the entry stays in its account");
     }
 
     #[test]
@@ -212,8 +320,9 @@ mod tests {
         let mut categories = Categories::default();
         categories.insert(CategoryId::generate(), "Bills".to_owned(), None);
         let current = entry(&categories, "bills", 100);
+        let ledger = ledger_with(categories);
 
-        let mut builder = ChangeBuilder::new("Edit", &categories);
+        let mut builder = ChangeBuilder::new("Edit", &ledger);
         builder.update_entry(EntryId::generate(), &current, parsed("BILLS"));
         assert!(builder.build().is_empty());
     }
@@ -227,5 +336,127 @@ mod tests {
 
         let op = Op::UpdateEntry { id, before: before.clone(), after: after.clone() };
         assert_eq!(op.inverse(), Op::UpdateEntry { id, before: after, after: before });
+    }
+
+    /// A ledger with the accounts "Cash" (with an entry) and "Bank" (without), both in PLN.
+    fn ledger_with_accounts() -> (Ledger, AccountId, AccountId) {
+        let mut ledger = Ledger::default();
+        let (cash, bank) = (ledger.add_test_account("Cash"), ledger.add_test_account("Bank"));
+        let mut builder = ChangeBuilder::new("Add", &ledger);
+        builder.add_entry(parsed("bills"), cash);
+        let change = builder.build();
+        ledger.apply(&mut MemoryStore, &change).unwrap();
+        (ledger, cash, bank)
+    }
+
+    #[test]
+    fn adds_accounts_with_trimmed_unique_names() {
+        let (ledger, ..) = ledger_with_accounts();
+        let mut builder = ChangeBuilder::new("Add account", &ledger);
+        let id = builder.add_account(" Savings ", currency("EUR")).unwrap();
+        assert_eq!(builder.add_account("  ", currency("EUR")), Err(AccountError::EmptyName));
+        assert_eq!(builder.add_account("CASH", currency("EUR")), Err(AccountError::DuplicateName));
+        assert_eq!(builder.add_account("savings", currency("EUR")), Err(AccountError::DuplicateName), "added by this change");
+
+        let change = builder.build();
+        let account = Account { name: "Savings".to_owned(), currency: currency("EUR"), deleted: false };
+        assert_eq!(change.ops, [Op::InsertAccount { id, account }]);
+    }
+
+    #[test]
+    fn names_of_deleted_accounts_stay_taken() {
+        let (mut ledger, cash, _) = ledger_with_accounts();
+        let mut builder = ChangeBuilder::new("Delete", &ledger);
+        builder.delete_account(cash);
+        let change = builder.build();
+        ledger.apply(&mut MemoryStore, &change).unwrap();
+
+        let mut builder = ChangeBuilder::new("Add account", &ledger);
+        assert_eq!(builder.add_account("Cash", currency("PLN")), Err(AccountError::DuplicateName));
+    }
+
+    #[test]
+    fn renames_accounts() {
+        let (ledger, cash, bank) = ledger_with_accounts();
+        let mut builder = ChangeBuilder::new("Rename", &ledger);
+        assert_eq!(builder.update_account(cash, "bank", currency("PLN")), Err(AccountError::DuplicateName));
+        assert_eq!(builder.update_account(cash, "", currency("PLN")), Err(AccountError::EmptyName));
+        builder.update_account(bank, "BANK ", currency("PLN")).unwrap();
+        let change = builder.build();
+
+        let [Op::UpdateAccount { id, before, after }] = change.ops.as_slice() else {
+            panic!("unexpected ops: {:?}", change.ops)
+        };
+        assert_eq!((*id, before.name.as_str(), after.name.as_str()), (bank, "Bank", "BANK"), "case can change");
+    }
+
+    #[test]
+    fn unchanged_account_update_records_nothing() {
+        let (ledger, cash, _) = ledger_with_accounts();
+        let mut builder = ChangeBuilder::new("Edit", &ledger);
+        builder.update_account(cash, " Cash ", currency("pln")).unwrap();
+        assert!(builder.build().is_empty());
+    }
+
+    #[test]
+    fn currency_changes_only_without_entries() {
+        let (ledger, cash, bank) = ledger_with_accounts();
+        let mut builder = ChangeBuilder::new("Edit", &ledger);
+        assert_eq!(builder.update_account(cash, "Cash", currency("EUR")), Err(AccountError::CurrencyInUse));
+        builder.update_account(bank, "Bank", currency("EUR")).unwrap();
+        let change = builder.build();
+
+        let [Op::UpdateAccount { after, .. }] = change.ops.as_slice() else { panic!("unexpected ops: {:?}", change.ops) };
+        assert_eq!(after.currency, currency("EUR"));
+    }
+
+    #[test]
+    fn deletes_and_restores_accounts() {
+        let (ledger, cash, _) = ledger_with_accounts();
+        let mut builder = ChangeBuilder::new("Delete", &ledger);
+        builder.delete_account(cash);
+        builder.delete_account(cash);
+        let change = builder.build();
+        let [Op::UpdateAccount { id, before, after }] = change.ops.as_slice() else {
+            panic!("unexpected ops: {:?}", change.ops)
+        };
+        assert_eq!((*id, before.deleted, after.deleted), (cash, false, true), "deleting twice records it once");
+
+        let mut builder = ChangeBuilder::new("Restore", &ledger);
+        builder.restore_account(cash);
+        assert!(builder.build().is_empty(), "the account isn't deleted");
+    }
+
+    #[test]
+    fn deleting_account_permanently_deletes_its_entries_first() {
+        let (mut ledger, cash, bank) = ledger_with_accounts();
+        let mut builder = ChangeBuilder::new("Add", &ledger);
+        builder.add_entry(parsed("food"), bank);
+        let change = builder.build();
+        ledger.apply(&mut MemoryStore, &change).unwrap();
+
+        let mut builder = ChangeBuilder::new("Delete permanently", &ledger);
+        builder.delete_account_permanently(cash);
+        let change = builder.build();
+        let (entry_id, entry) = ledger.entries()[0].clone();
+        let account = ledger.accounts().get(cash).unwrap().clone();
+        assert_eq!(
+            change.ops,
+            [Op::DeleteEntry { id: entry_id, entry }, Op::DeleteAccount { id: cash, account }],
+            "only the account's entries, no categories"
+        );
+    }
+
+    #[test]
+    fn account_inverses() {
+        let id = AccountId::generate();
+        let account = Account { name: "Cash".to_owned(), currency: currency("PLN"), deleted: false };
+        let deleted = Account { deleted: true, ..account.clone() };
+
+        let insert = Op::InsertAccount { id, account: account.clone() };
+        assert_eq!(insert.inverse(), Op::DeleteAccount { id, account: account.clone() });
+        assert_eq!(insert.inverse().inverse(), insert);
+        let update = Op::UpdateAccount { id, before: account.clone(), after: deleted.clone() };
+        assert_eq!(update.inverse(), Op::UpdateAccount { id, before: deleted, after: account });
     }
 }

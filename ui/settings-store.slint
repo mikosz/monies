@@ -1,0 +1,38 @@
+import { AccountRow } from "account-line.slint";
+
+// Settings, currently accounts, and the operations on them, implemented in Rust.
+export global SettingsStore {
+    // All accounts in the order they were created, deleted ones included, followed by an extra
+    // row for adding accounts.
+    in property <[AccountRow]> accounts;
+    // Whether there's an account that isn't deleted. Entries can't be added without one.
+    in property <bool> has-accounts;
+    in property <bool> has-deleted-accounts;
+
+    // Arguments: name, currency.
+    // Returns true when the input was valid and the account has been added.
+    callback add-account(string, string) -> bool;
+    // Arguments: id, name, currency.
+    // Returns true when the input was valid and the account has been saved (or was unchanged).
+    callback update-account(string, string, string) -> bool;
+    // Moves the account with the id to the trash.
+    callback delete-account(string);
+    // Brings the account with the id back from the trash.
+    callback restore-account(string);
+    // Deletes the account with the id and its entries.
+    callback delete-account-permanently(string);
+
+    // Id of the account being edited in place, or "" when none is. While editing, everything
+    // else is disabled. Adding is editing the row with `new-account-id`.
+    in-out property <string> editing-id;
+    // Id of the extra last row of `accounts`, used for adding accounts.
+    out property <string> new-account-id: "new";
+    // Id of the deleted account whose permanent deletion awaits confirmation, or "" when none
+    // does. Everything else is disabled meanwhile.
+    in-out property <string> deleting-id;
+
+    // Suggestions for the text last reported through `currency-edited`.
+    in property <[string]> currency-suggestions;
+    // Called with the text of a currency input when it gains focus or changes.
+    callback currency-edited(string);
+}

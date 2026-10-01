@@ -1,13 +1,15 @@
-//! Builds `sample.db` next to this file from `entries.csv`, for trying the app with data:
+//! Builds `sample.db` next to this file from `accounts.csv` and `entries.csv`, for trying the
+//! app with data:
 //!
 //! ```text
 //! cargo run --example sample_db [-- --force]
 //! cargo run -- --db examples/sample_db/sample.db
 //! ```
 //!
-//! Each CSV row is one entry, in the order they were entered: an ISO date, a name, a category
-//! path and an amount (expenses positive, income negative). `--force` replaces an existing
-//! database.
+//! Each row of `accounts.csv` is an account, in the order they were created: a name and a
+//! currency code. Each row of `entries.csv` is one entry, in the order they were entered: an
+//! ISO date, a name, a category path and an amount (expenses positive, income negative). For
+//! now, all entries go to the first account. `--force` replaces an existing database.
 
 use std::error::Error;
 use std::path::Path;
@@ -25,9 +27,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         std::fs::remove_file(&database)?;
     }
 
-    match fill(&database, &directory.join("entries.csv")) {
-        Ok(count) => {
-            println!("Created {} with {count} entries", database.display());
+    match fill(&database, &directory.join("accounts.csv"), &directory.join("entries.csv")) {
+        Ok((accounts, entries)) => {
+            println!("Created {} with {accounts} accounts and {entries} entries", database.display());
             Ok(())
         }
         Err(error) => {
@@ -39,21 +41,36 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 /// Creates the database and adds every CSV row in one transaction; returns the number of
-/// entries.
-fn fill(database: &Path, csv: &Path) -> Result<usize, Box<dyn Error>> {
+/// accounts and entries.
+fn fill(database: &Path, accounts_csv: &Path, entries_csv: &Path) -> Result<(usize, usize), Box<dyn Error>> {
     let mut writer = DatabaseWriter::create(database)?;
-    let mut reader = csv::Reader::from_path(csv)?;
 
+    let mut accounts = Vec::new();
+    read(accounts_csv, |[name, currency]| {
+        accounts.push(name.to_owned());
+        writer.add_account(name, currency)
+    })?;
+    // Until entries.csv names accounts, everything goes to the first one.
+    let first = accounts.first().ok_or_else(|| format!("{} has no accounts", accounts_csv.display()))?;
+    let entries = read(entries_csv, |[date, name, category, amount]| writer.add_entry(first, date, name, category, amount))?;
+    writer.finish()?;
+    Ok((accounts.len(), entries))
+}
+
+/// Calls `add` with the `N` fields of every row of the CSV file; returns the number of rows.
+/// Errors name the file and line.
+fn read<const N: usize>(
+    csv: &Path,
+    mut add: impl FnMut([&str; N]) -> Result<(), Box<dyn Error>>,
+) -> Result<usize, Box<dyn Error>> {
+    let mut reader = csv::Reader::from_path(csv)?;
     let mut count = 0;
     for record in reader.records() {
         let record = record?;
         let line = record.position().map_or(0, |position| position.line());
-        let [date, name, category, amount] = [0, 1, 2, 3].map(|field| record.get(field).unwrap_or(""));
-        writer
-            .add_entry(date, name, category, amount)
+        add(std::array::from_fn(|field| record.get(field).unwrap_or("")))
             .map_err(|error| format!("{} line {line}: {error}", csv.display()))?;
         count += 1;
     }
-    writer.finish()?;
     Ok(count)
 }

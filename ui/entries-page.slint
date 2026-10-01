@@ -3,12 +3,13 @@ import { EntriesStore } from "entries-store.slint";
 import { EntryEditor } from "entry-editor.slint";
 import { EntryColumn, EntryKind, EntryLine, EntryRow, RowType } from "entry-line.slint";
 import { Page } from "page.slint";
+import { SettingsStore } from "settings-store.slint";
 
 export { EntriesStore, EntryKind, EntryRow, RowType }
 
 // The list of entries by date, divided into months. Pressing A adds entries in a line at the
 // end of the list until Escape; double-clicking a line edits it in place. Both are modal:
-// everything else is dimmed and disabled meanwhile.
+// everything else is dimmed and disabled meanwhile. Without an account, entries can't be added.
 export component EntriesPage inherits Page {
     title: "Entries";
     description: "";
@@ -53,7 +54,7 @@ export component EntriesPage inherits Page {
 
     keys := FocusScope {
         key-pressed(event) => {
-            if (!root.editing && (event.text == "a" || event.text == "A")
+            if (!root.editing && SettingsStore.has-accounts && (event.text == "a" || event.text == "A")
                 && !event.modifiers.control && !event.modifiers.alt && !event.modifiers.meta) {
                 root.start-adding();
                 return accept;

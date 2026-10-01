@@ -1,0 +1,260 @@
+import { Button, Palette } from "std-widgets.slint";
+import { AccountEditor } from "account-editor.slint";
+import { AccountLine, AccountRow } from "account-line.slint";
+import { Page } from "page.slint";
+import { SettingsStore } from "settings-store.slint";
+
+export { AccountRow, SettingsStore }
+
+// The accounts. Pressing A adds accounts in a line at the end of the list until Escape;
+// double-clicking a line edits it in place. Both are modal like on the entries page.
+// Deleted accounts are listed separately, to be restored or, after confirmation, deleted
+// permanently.
+//
+// TODO: tell why input is rejected (empty or duplicate name, invalid currency, currency change
+// of an account with entries); for now the editor just stays open.
+export component SettingsPage inherits Page {
+    title: "Settings";
+    description: "";
+
+    // Lines and the input row share these so the columns line up, also across both lists.
+    property <length> column-spacing: 8px;
+    property <length> currency-width: 80px;
+    property <length> entries-width: 90px;
+    // Fits the buttons of deleted accounts.
+    property <length> actions-width: 220px;
+    property <length> line-padding: 8px;
+
+    property <bool> editing: SettingsStore.editing-id != "";
+    property <bool> adding: SettingsStore.editing-id == SettingsStore.new-account-id;
+    property <bool> confirming: SettingsStore.deleting-id != "";
+    // Everything but the editor or the confirmation is disabled.
+    property <bool> modal: root.editing || root.confirming;
+
+    // The account whose permanent deletion awaits confirmation.
+    property <string> deleting-name;
+    property <int> deleting-entries;
+
+    // Without input fields, keys (A, and the window's undo shortcuts) need something focused.
+    init => { keys.focus(); }
+
+    function start-edit(id: string) {
+        SettingsStore.editing-id = id;
+    }
+
+    function finish-edit() {
+        SettingsStore.editing-id = "";
+        keys.focus();
+    }
+
+    function confirm-deletion(account: AccountRow) {
+        root.deleting-name = account.name;
+        root.deleting-entries = account.entries;
+        SettingsStore.deleting-id = account.id;
+    }
+
+    function finish-confirmation() {
+        SettingsStore.deleting-id = "";
+        keys.focus();
+    }
+
+    keys := FocusScope {
+        key-pressed(event) => {
+            if (!root.modal && (event.text == "a" || event.text == "A")
+                && !event.modifiers.control && !event.modifiers.alt && !event.modifiers.meta) {
+                root.start-edit(SettingsStore.new-account-id);
+                return accept;
+            }
+            return reject;
+        }
+
+        // The lists are short, so there's no scrolling. Lines carry the gap below them, as
+        // most rows of the repeaters are empty (e.g. deleted accounts in the first list).
+        VerticalLayout {
+            alignment: start;
+
+            Rectangle {
+                opacity: root.modal ? 0.4 : 1;
+
+                VerticalLayout {
+                    padding-bottom: 6px;
+                    spacing: 4px;
+
+                    Text {
+                        text: "Accounts";
+                        font-size: 16px;
+                        font-weight: 600;
+                    }
+                    if !SettingsStore.has-accounts : Text {
+                        text: "Add an account to start: press A.";
+                    }
+                }
+            }
+
+            for row in SettingsStore.accounts : VerticalLayout {
+                property <bool> is-new: row.id == SettingsStore.new-account-id;
+                property <bool> is-edited: root.editing && row.id == SettingsStore.editing-id;
+                padding-bottom: (!row.deleted && !self.is-new) || self.is-edited ? 3px : 0px;
+
+                if !row.deleted && !is-new && !is-edited : AccountLine {
+                    account: row;
+                    dimmed: root.modal;
+                    column-spacing: root.column-spacing;
+                    currency-width: root.currency-width;
+                    entries-width: root.entries-width;
+                    actions-width: root.actions-width;
+                    horizontal-padding: root.line-padding;
+                    double-clicked => { root.start-edit(row.id); }
+
+                    Button {
+                        text: "Delete";
+                        enabled: !root.modal;
+                        clicked => {
+                            SettingsStore.delete-account(row.id);
+                            keys.focus();
+                        }
+                    }
+                }
+
+                if is-edited : Rectangle {
+                    border-width: 1px;
+                    border-color: Palette.accent-background;
+                    border-radius: 4px;
+
+                    VerticalLayout {
+                        padding: 2px;
+
+                        AccountEditor {
+                            column-spacing: root.column-spacing;
+                            currency-width: root.currency-width;
+                            trailing-width: root.entries-width + root.column-spacing + root.actions-width;
+                            init => {
+                                self.name = row.name;
+                                self.currency = row.currency;
+                                self.focus-name();
+                            }
+                            submitted => {
+                                if (is-new) {
+                                    // Stay in adding mode for the next account.
+                                    if (SettingsStore.add-account(self.name, self.currency)) {
+                                        self.reset();
+                                    }
+                                } else if (SettingsStore.update-account(row.id, self.name, self.currency)) {
+                                    root.finish-edit();
+                                }
+                            }
+                            cancelled => { root.finish-edit(); }
+                        }
+                    }
+                }
+            }
+
+            if SettingsStore.has-deleted-accounts : Rectangle {
+                opacity: root.modal ? 0.4 : 1;
+
+                VerticalLayout {
+                    padding-top: 16px;
+                    padding-bottom: 6px;
+
+                    Text {
+                        text: "Deleted accounts";
+                        font-size: 16px;
+                        font-weight: 600;
+                    }
+                }
+            }
+
+            for row in SettingsStore.accounts : VerticalLayout {
+                padding-bottom: row.deleted ? 3px : 0px;
+
+                if row.deleted : AccountLine {
+                    account: row;
+                    dimmed: root.modal;
+                    column-spacing: root.column-spacing;
+                    currency-width: root.currency-width;
+                    entries-width: root.entries-width;
+                    actions-width: root.actions-width;
+                    horizontal-padding: root.line-padding;
+
+                    Button {
+                        text: "Restore";
+                        enabled: !root.modal;
+                        clicked => {
+                            SettingsStore.restore-account(row.id);
+                            keys.focus();
+                        }
+                    }
+                    Button {
+                        text: "Delete permanently";
+                        enabled: !root.modal;
+                        clicked => { root.confirm-deletion(row); }
+                    }
+                }
+            }
+        }
+
+        // Asks before deleting an account permanently. The backdrop covers the page and takes
+        // its clicks.
+        if root.confirming : Rectangle {
+            x: 0;
+            y: 0;
+            width: parent.width;
+            height: parent.height;
+            background: #00000060;
+
+            TouchArea {}
+
+            Rectangle {
+                width: Math.min(420px, parent.width - 32px);
+                height: dialog.preferred-height;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 3;
+                background: Palette.background;
+                border-color: Palette.border;
+                border-width: 1px;
+                border-radius: 6px;
+                drop-shadow-blur: 12px;
+                drop-shadow-color: #00000060;
+
+                FocusScope {
+                    init => { self.focus(); }
+                    key-pressed(event) => {
+                        if (event.text == Key.Escape) {
+                            root.finish-confirmation();
+                            return accept;
+                        }
+                        return reject;
+                    }
+
+                    dialog := VerticalLayout {
+                        padding: 16px;
+                        spacing: 16px;
+
+                        Text {
+                            text: root.deleting-entries == 0 ? "Delete ‘\{root.deleting-name}’ permanently?"
+                                : root.deleting-entries == 1 ? "Delete ‘\{root.deleting-name}’ and its entry permanently?"
+                                : "Delete ‘\{root.deleting-name}’ and its \{root.deleting-entries} entries permanently?";
+                            wrap: word-wrap;
+                        }
+                        HorizontalLayout {
+                            alignment: end;
+                            spacing: 8px;
+
+                            Button {
+                                text: "Delete permanently";
+                                clicked => {
+                                    SettingsStore.delete-account-permanently(SettingsStore.deleting-id);
+                                    root.finish-confirmation();
+                                }
+                            }
+                            Button {
+                                text: "Cancel";
+                                clicked => { root.finish-confirmation(); }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
