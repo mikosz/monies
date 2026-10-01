@@ -11,15 +11,6 @@ pub struct Ledger {
     entries: Vec<(EntryId, Entry)>,
 }
 
-/// How the list of entries changed while a [`Change`] was applied, in the order it happened.
-/// Indices refer to the list at that moment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EntryListUpdate {
-    Inserted { index: usize, id: EntryId },
-    Removed { index: usize },
-    Updated { index: usize },
-}
-
 impl Ledger {
     #[cfg_attr(target_arch = "wasm32", expect(dead_code, reason = "only used when loading from a database"))]
     pub fn new(categories: Categories, mut entries: Vec<(EntryId, Entry)>) -> Self {
@@ -41,35 +32,29 @@ impl Ledger {
     }
 
     /// Applies a change to the store and then, once that succeeded, to the ledger.
-    pub fn apply<S: Store>(&mut self, store: &mut S, change: &Change) -> Result<Vec<EntryListUpdate>, S::Error> {
+    pub fn apply<S: Store>(&mut self, store: &mut S, change: &Change) -> Result<(), S::Error> {
         store.apply(change)?;
-        Ok(change.ops.iter().filter_map(|op| self.apply_op(op)).collect())
+        for op in &change.ops {
+            self.apply_op(op);
+        }
+        Ok(())
     }
 
-    fn apply_op(&mut self, op: &Op) -> Option<EntryListUpdate> {
+    fn apply_op(&mut self, op: &Op) {
         match op {
-            Op::InsertCategory { id, name, parent } => {
-                self.categories.insert(*id, name.clone(), *parent);
-                None
-            }
-            Op::DeleteCategory { id, .. } => {
-                self.categories.remove(*id);
-                None
-            }
+            Op::InsertCategory { id, name, parent } => self.categories.insert(*id, name.clone(), *parent),
+            Op::DeleteCategory { id, .. } => self.categories.remove(*id),
             Op::InsertEntry { id, entry } => {
                 let index = self.index_of(*id).expect_err("entry ids are unique");
                 self.entries.insert(index, (*id, entry.clone()));
-                Some(EntryListUpdate::Inserted { index, id: *id })
             }
             Op::DeleteEntry { id, .. } => {
                 let index = self.index_of(*id).expect("deleted entry exists");
                 self.entries.remove(index);
-                Some(EntryListUpdate::Removed { index })
             }
             Op::UpdateEntry { id, after, .. } => {
                 let index = self.index_of(*id).expect("updated entry exists");
                 self.entries[index].1 = after.clone();
-                Some(EntryListUpdate::Updated { index })
             }
         }
     }
@@ -91,12 +76,12 @@ mod tests {
         ParsedEntry::parse(&DateFormat::iso(), "2026-09-30", "Rent", category, amount).unwrap()
     }
 
-    fn add(ledger: &mut Ledger, category: &str) -> (Change, Vec<EntryListUpdate>) {
+    fn add(ledger: &mut Ledger, category: &str) -> (Change, EntryId) {
         let mut builder = ChangeBuilder::new("Add", ledger.categories());
-        builder.add_entry(parsed(category, "1"));
+        let id = builder.add_entry(parsed(category, "1"));
         let change = builder.build();
-        let updates = ledger.apply(&mut MemoryStore, &change).unwrap();
-        (change, updates)
+        ledger.apply(&mut MemoryStore, &change).unwrap();
+        (change, id)
     }
 
     fn paths(ledger: &Ledger) -> Vec<String> {
@@ -110,8 +95,8 @@ mod tests {
         let (_, second) = add(&mut ledger, "Bills.Rent");
         add(&mut ledger, "dogs");
 
-        assert!(matches!(first[..], [EntryListUpdate::Inserted { index: 0, .. }]));
-        assert!(matches!(second[..], [EntryListUpdate::Inserted { index: 1, .. }]));
+        assert_eq!(ledger.entries()[0].0, first);
+        assert_eq!(ledger.entries()[1].0, second);
         assert_eq!(paths(&ledger), ["bills.rent", "bills.rent", "dogs"]);
         assert_eq!(ledger.entries()[0].1.category, ledger.entries()[1].1.category);
     }
@@ -120,16 +105,15 @@ mod tests {
     fn inverse_restores_previous_state() {
         let mut ledger = Ledger::default();
         add(&mut ledger, "bills.rent");
-        let (change, _) = add(&mut ledger, "dogs.health");
+        let (change, id) = add(&mut ledger, "dogs.health");
         add(&mut ledger, "bills.water");
 
-        let updates = ledger.apply(&mut MemoryStore, &change.inverse()).unwrap();
-        assert_eq!(updates, [EntryListUpdate::Removed { index: 1 }]);
+        ledger.apply(&mut MemoryStore, &change.inverse()).unwrap();
         assert_eq!(paths(&ledger), ["bills.rent", "bills.water"]);
+        assert!(ledger.entry(id).is_none());
         assert!(ledger.categories().suggest("dogs").is_empty(), "categories created by the change are removed");
 
-        let updates = ledger.apply(&mut MemoryStore, &change).unwrap();
-        let [EntryListUpdate::Inserted { index: 1, id }] = updates[..] else { panic!("{updates:?}") };
+        ledger.apply(&mut MemoryStore, &change).unwrap();
         assert_eq!(paths(&ledger), ["bills.rent", "dogs.health", "bills.water"], "redo puts it back in place");
         assert!(ledger.entry(id).is_some());
     }
@@ -144,9 +128,8 @@ mod tests {
         let mut builder = ChangeBuilder::new("Edit", ledger.categories());
         builder.update_entry(id, &current, parsed("bills.water", "-5"));
         let change = builder.build();
-        let updates = ledger.apply(&mut MemoryStore, &change).unwrap();
+        ledger.apply(&mut MemoryStore, &change).unwrap();
 
-        assert_eq!(updates, [EntryListUpdate::Updated { index: 0 }]);
         assert_eq!(paths(&ledger), ["bills.water", "food"]);
         assert_eq!(ledger.entry(id).unwrap().amount, -500);
 

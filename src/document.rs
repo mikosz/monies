@@ -1,6 +1,6 @@
 use crate::change::Change;
 use crate::history::History;
-use crate::ledger::{EntryListUpdate, Ledger};
+use crate::ledger::Ledger;
 use crate::store::Store;
 
 /// How many changes can be undone.
@@ -24,28 +24,28 @@ impl<S: Store> Document<S> {
     }
 
     /// Applies a change made by the user and makes it undoable.
-    pub fn perform(&mut self, change: Change) -> Result<Vec<EntryListUpdate>, S::Error> {
-        let updates = self.ledger.apply(&mut self.store, &change)?;
+    pub fn perform(&mut self, change: Change) -> Result<(), S::Error> {
+        self.ledger.apply(&mut self.store, &change)?;
         self.history.record(change);
-        Ok(updates)
+        Ok(())
     }
 
-    /// Reverts the last change; `Ok(None)` when there's nothing to undo. On error nothing
+    /// Reverts the last change; `Ok(false)` when there's nothing to undo. On error nothing
     /// changes, including the history.
-    pub fn undo(&mut self) -> Result<Option<Vec<EntryListUpdate>>, S::Error> {
-        let Some(change) = self.history.next_undo() else { return Ok(None) };
-        let updates = self.ledger.apply(&mut self.store, &change.inverse())?;
+    pub fn undo(&mut self) -> Result<bool, S::Error> {
+        let Some(change) = self.history.next_undo() else { return Ok(false) };
+        self.ledger.apply(&mut self.store, &change.inverse())?;
         self.history.undone();
-        Ok(Some(updates))
+        Ok(true)
     }
 
-    /// Applies the last undone change again; `Ok(None)` when there's nothing to redo. On error
+    /// Applies the last undone change again; `Ok(false)` when there's nothing to redo. On error
     /// nothing changes, including the history.
-    pub fn redo(&mut self) -> Result<Option<Vec<EntryListUpdate>>, S::Error> {
-        let Some(change) = self.history.next_redo() else { return Ok(None) };
-        let updates = self.ledger.apply(&mut self.store, change)?;
+    pub fn redo(&mut self) -> Result<bool, S::Error> {
+        let Some(change) = self.history.next_redo() else { return Ok(false) };
+        self.ledger.apply(&mut self.store, change)?;
         self.history.redone();
-        Ok(Some(updates))
+        Ok(true)
     }
 }
 
@@ -73,16 +73,16 @@ mod tests {
         add(&mut document, "a");
         add(&mut document, "b");
 
-        document.undo().unwrap().unwrap();
+        assert!(document.undo().unwrap());
         assert_eq!(names(&document), ["a"]);
-        document.undo().unwrap().unwrap();
+        assert!(document.undo().unwrap());
         assert!(names(&document).is_empty());
-        assert!(document.undo().unwrap().is_none(), "nothing left to undo");
+        assert!(!document.undo().unwrap(), "nothing left to undo");
 
-        document.redo().unwrap().unwrap();
-        document.redo().unwrap().unwrap();
+        assert!(document.redo().unwrap());
+        assert!(document.redo().unwrap());
         assert_eq!(names(&document), ["a", "b"]);
-        assert!(document.redo().unwrap().is_none(), "nothing left to redo");
+        assert!(!document.redo().unwrap(), "nothing left to redo");
     }
 
     #[test]
@@ -92,7 +92,7 @@ mod tests {
         document.undo().unwrap();
         add(&mut document, "b");
 
-        assert!(document.redo().unwrap().is_none());
+        assert!(!document.redo().unwrap());
         assert_eq!(names(&document), ["b"]);
     }
 
@@ -120,12 +120,12 @@ mod tests {
         assert!(document.undo().is_err());
         assert_eq!(document.ledger().entries().len(), 1);
         document.store.failing = false;
-        assert!(document.undo().unwrap().is_some(), "the change is still undoable");
+        assert!(document.undo().unwrap(), "the change is still undoable");
 
         document.store.failing = true;
         assert!(document.redo().is_err());
         assert!(document.ledger().entries().is_empty());
         document.store.failing = false;
-        assert!(document.redo().unwrap().is_some(), "the change is still redoable");
+        assert!(document.redo().unwrap(), "the change is still redoable");
     }
 }

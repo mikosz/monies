@@ -1,14 +1,14 @@
 import { ListView, Palette } from "std-widgets.slint";
 import { EntriesStore } from "entries-store.slint";
 import { EntryEditor } from "entry-editor.slint";
-import { EntryColumn, EntryKind, EntryLine, EntryRow } from "entry-line.slint";
+import { EntryColumn, EntryKind, EntryLine, EntryRow, RowType } from "entry-line.slint";
 import { Page } from "page.slint";
 
-export { EntriesStore, EntryKind, EntryRow }
+export { EntriesStore, EntryKind, EntryRow, RowType }
 
-// The list of entries. Pressing A adds entries in a line at the end of the list until Escape;
-// double-clicking a line edits it in place. Both are modal: everything else is dimmed and
-// disabled meanwhile.
+// The list of entries by date, divided into months. Pressing A adds entries in a line at the
+// end of the list until Escape; double-clicking a line edits it in place. Both are modal:
+// everything else is dimmed and disabled meanwhile.
 export component EntriesPage inherits Page {
     title: "Entries";
     description: "";
@@ -112,13 +112,30 @@ export component EntriesPage inherits Page {
                     }
                 }
 
-                // One row per entry plus the last one for adding, which takes no space unless
-                // adding. ListView items can't have spacing, so each carries the gap below it.
+                // Entries and month separators, plus the last row for adding, which takes no
+                // space unless adding. ListView items can't have spacing, so each carries the gap
+                // below it.
                 for row in EntriesStore.entries : VerticalLayout {
-                    property <bool> is-new: row.id == EntriesStore.new-entry-id;
+                    property <bool> is-new: row.row-type == RowType.new-entry;
                     padding-bottom: !self.is-new || root.adding ? 3px : 0px;
 
-                    if !is-new && row.id != EntriesStore.editing-id : EntryLine {
+                    if row.row-type == RowType.month : Rectangle {
+                        opacity: root.editing ? 0.4 : 1;
+
+                        HorizontalLayout {
+                            padding-left: root.line-padding;
+                            padding-top: 10px;
+                            padding-bottom: 2px;
+
+                            Text {
+                                text: row.title;
+                                font-size: 16px;
+                                font-weight: 600;
+                            }
+                        }
+                    }
+
+                    if row.row-type == RowType.entry && row.id != EntriesStore.editing-id : EntryLine {
                         entry: row;
                         dimmed: root.editing;
                         column-spacing: root.column-spacing;
@@ -129,7 +146,8 @@ export component EntriesPage inherits Page {
                         double-clicked(column) => { root.start-edit(row.id, column); }
                     }
 
-                    if row.id == EntriesStore.editing-id : Rectangle {
+                    // Separators have no id, so `editing` is checked too ("" means not editing).
+                    if root.editing && row.id == EntriesStore.editing-id : Rectangle {
                         border-width: 1px;
                         border-color: Palette.accent-background;
                         border-radius: 4px;

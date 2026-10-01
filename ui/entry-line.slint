@@ -4,7 +4,19 @@ export enum EntryKind { expense, income, neutral }
 
 export enum EntryColumn { date, name, category, amount }
 
+// What a row of the list of entries is.
+export enum RowType {
+    entry,
+    // Separates months; `title` names the month.
+    month,
+    // The last row, edited to add a new entry.
+    new-entry
+}
+
 export struct EntryRow {
+    row-type: RowType,
+    // For `month` rows.
+    title: string,
     // The entry's id, to refer back to it (e.g. when saving an edit).
     id: string,
     date: string,
