@@ -21,8 +21,27 @@ pub struct Entry {
     pub date: NaiveDate,
     pub name: String,
     pub category: CategoryId,
-    /// Amount in minor units (cents). Negative values are allowed.
+    /// Amount in minor units (cents): positive for expenses, negative for income.
     pub amount: i64,
+}
+
+/// Whether an entry is money spent or received.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryKind {
+    Expense,
+    Income,
+    /// A zero amount.
+    Neutral,
+}
+
+impl Entry {
+    pub fn kind(&self) -> EntryKind {
+        match self.amount.cmp(&0) {
+            std::cmp::Ordering::Greater => EntryKind::Expense,
+            std::cmp::Ordering::Less => EntryKind::Income,
+            std::cmp::Ordering::Equal => EntryKind::Neutral,
+        }
+    }
 }
 
 /// Validated user input for an entry whose category path hasn't been resolved yet.
@@ -186,5 +205,17 @@ mod tests {
         assert_eq!(format_amount(-1250), "-12.50");
         assert_eq!(format_amount(-5), "-0.05");
         assert_eq!(format_amount(i64::MIN), "-92233720368547758.08");
+    }
+
+    #[test]
+    fn expenses_are_positive_and_income_negative() {
+        let kind = |amount| {
+            let parsed = parse("2026-09-30", "a", "c", amount).unwrap();
+            let entry = Entry { date: parsed.date, name: parsed.name, category: CategoryId::generate(), amount: parsed.amount };
+            entry.kind()
+        };
+        assert_eq!(kind("12.50"), EntryKind::Expense);
+        assert_eq!(kind("-7800"), EntryKind::Income);
+        assert_eq!(kind("0"), EntryKind::Neutral);
     }
 }

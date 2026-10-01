@@ -73,6 +73,11 @@ impl View {
             name: entry.name.as_str().into(),
             category: categories.path(entry.category).into(),
             amount: format_amount(entry.amount).into(),
+            kind: match entry.kind() {
+                entry::EntryKind::Expense => EntryKind::Expense,
+                entry::EntryKind::Income => EntryKind::Income,
+                entry::EntryKind::Neutral => EntryKind::Neutral,
+            },
         }
     }
 

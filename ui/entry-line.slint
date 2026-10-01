@@ -1,0 +1,73 @@
+import { Palette } from "std-widgets.slint";
+
+export enum EntryKind { expense, income, neutral }
+
+export struct EntryRow {
+    date: string,
+    name: string,
+    category: string,
+    amount: string,
+    kind: EntryKind,
+}
+
+// One entry in the list, drawn as a card tinted by its kind that highlights on hover.
+// Column sizes come from the page so lines align with the header and the input row.
+export component EntryLine inherits Rectangle {
+    in property <EntryRow> entry;
+    in property <length> column-spacing;
+    in property <length> date-width;
+    in property <length> amount-width;
+    // Minimum width of the name and category columns, which share the remaining space.
+    in property <length> flexible-width;
+    // Space between the card's edge and its text; the header uses the same.
+    in property <length> horizontal-padding;
+
+    // Colours mix the theme's background with a hint of colour, so they suit light and dark
+    // themes alike. Hovering mixes in a bit of the text colour: darker on light themes,
+    // lighter on dark ones.
+    property <color> expense-tint: Palette.background.mix(#e53935, 0.92);
+    property <color> income-tint: Palette.background.mix(#43a047, 0.92);
+    property <color> neutral-tint: Palette.background.mix(Palette.foreground, 0.96);
+    property <color> tint: root.entry.kind == EntryKind.expense ? root.expense-tint
+        : root.entry.kind == EntryKind.income ? root.income-tint
+        : root.neutral-tint;
+
+    background: touch.has-hover ? root.tint.mix(Palette.foreground, 0.92) : root.tint;
+    border-radius: 4px;
+    animate background { duration: 100ms; }
+
+    HorizontalLayout {
+        padding-left: root.horizontal-padding;
+        padding-right: root.horizontal-padding;
+        padding-top: 6px;
+        padding-bottom: 6px;
+        spacing: root.column-spacing;
+
+        Text {
+            width: root.date-width;
+            text: root.entry.date;
+        }
+        Text {
+            horizontal-stretch: 1;
+            min-width: root.flexible-width;
+            preferred-width: root.flexible-width;
+            text: root.entry.name;
+            overflow: elide;
+        }
+        Text {
+            horizontal-stretch: 1;
+            min-width: root.flexible-width;
+            preferred-width: root.flexible-width;
+            text: root.entry.category;
+            overflow: elide;
+        }
+        Text {
+            width: root.amount-width;
+            text: root.entry.amount;
+            horizontal-alignment: right;
+        }
+    }
+
+    // Covers the whole line; clicks, double-clicks and context menus will hook in here.
+    touch := TouchArea {}
+}
