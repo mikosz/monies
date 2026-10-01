@@ -6,11 +6,14 @@ import { Page } from "page.slint";
 
 export { EntriesStore, EntryKind, EntryRow }
 
+// The list of entries. Pressing A adds entries in a line at the end of the list until Escape;
+// double-clicking a line edits it in place. Both are modal: everything else is dimmed and
+// disabled meanwhile.
 export component EntriesPage inherits Page {
     title: "Entries";
     description: "";
 
-    // Header, rows and input share these constraints so the columns line up.
+    // Header and lines share these constraints so the columns line up.
     property <length> column-spacing: 8px;
     property <length> date-width: 110px;
     property <length> amount-width: 110px;
@@ -18,10 +21,13 @@ export component EntriesPage inherits Page {
     // Padding inside an entry line; the header uses the same so its titles align.
     property <length> line-padding: 8px;
 
-    // Editing is modal: while a line is edited, everything else is dimmed and disabled.
     property <bool> editing: EntriesStore.editing-id != "";
-    // Column to focus when the editor opens.
+    property <bool> adding: EntriesStore.editing-id == EntriesStore.new-entry-id;
+    // Column to focus when an editor opens.
     property <EntryColumn> edit-column;
+
+    // Without input fields, keys (A, and the window's undo shortcuts) need something focused.
+    init => { keys.focus(); }
 
     function start-edit(id: string, column: EntryColumn) {
         root.edit-column = column;
@@ -30,109 +36,134 @@ export component EntriesPage inherits Page {
 
     function finish-edit() {
         EntriesStore.editing-id = "";
-        input-row.focus-column(EntryColumn.date);
+        keys.focus();
     }
 
-    VerticalLayout {
-        spacing: 4px;
+    function start-adding() {
+        root.start-edit(EntriesStore.new-entry-id, EntryColumn.date);
+        root.scroll-to-bottom();
+    }
 
-        // Layouts have no opacity, hence the rectangle.
-        Rectangle {
-            opacity: root.editing ? 0.4 : 1;
+    // Shows the end of the list, where new entries are added. The list only creates the lines
+    // in view and estimates the height of the rest, so this may land a bit short; the list
+    // corrects it once the actual height is known (see `changed content-height`).
+    function scroll-to-bottom() {
+        list.content-y = Math.min(0px, list.visible-height - list.content-height);
+    }
 
-            HorizontalLayout {
-                padding-left: root.line-padding;
-                padding-right: root.line-padding;
-                spacing: root.column-spacing;
-
-                Text {
-                    width: root.date-width;
-                    text: "Date";
-                    font-weight: 700;
-                }
-                Text {
-                    horizontal-stretch: 1;
-                    min-width: root.flexible-width;
-                    preferred-width: root.flexible-width;
-                    text: "Name";
-                    font-weight: 700;
-                }
-                Text {
-                    horizontal-stretch: 1;
-                    min-width: root.flexible-width;
-                    preferred-width: root.flexible-width;
-                    text: "Category";
-                    font-weight: 700;
-                }
-                Text {
-                    width: root.amount-width;
-                    text: "Amount";
-                    font-weight: 700;
-                    horizontal-alignment: right;
-                }
+    keys := FocusScope {
+        key-pressed(event) => {
+            if (!root.editing && (event.text == "a" || event.text == "A")
+                && !event.modifiers.control && !event.modifiers.alt && !event.modifiers.meta) {
+                root.start-adding();
+                return accept;
             }
+            return reject;
         }
 
-        ListView {
-            vertical-stretch: 1;
+        VerticalLayout {
+            spacing: 4px;
 
-            // ListView items can't have spacing, so each line carries the gap below it.
-            for row in EntriesStore.entries : VerticalLayout {
-                padding-bottom: 3px;
+            // Layouts have no opacity, hence the rectangle.
+            Rectangle {
+                opacity: root.editing ? 0.4 : 1;
 
-                if row.id != EntriesStore.editing-id : EntryLine {
-                    entry: row;
-                    dimmed: root.editing;
-                    column-spacing: root.column-spacing;
-                    date-width: root.date-width;
-                    amount-width: root.amount-width;
-                    flexible-width: root.flexible-width;
-                    horizontal-padding: root.line-padding;
-                    double-clicked(column) => { root.start-edit(row.id, column); }
-                }
+                HorizontalLayout {
+                    padding-left: root.line-padding;
+                    padding-right: root.line-padding;
+                    spacing: root.column-spacing;
 
-                if row.id == EntriesStore.editing-id : Rectangle {
-                    border-width: 1px;
-                    border-color: Palette.accent-background;
-                    border-radius: 4px;
-
-                    VerticalLayout {
-                        padding: 2px;
-
-                        EntryEditor {
-                            column-spacing: root.column-spacing;
-                            date-width: root.date-width;
-                            amount-width: root.amount-width;
-                            flexible-width: root.flexible-width;
-                            trap-focus: true;
-                            init => {
-                                self.date = row.date;
-                                self.name = row.name;
-                                self.category = row.category;
-                                self.amount = row.amount;
-                                self.focus-column(root.edit-column);
-                            }
-                            submitted => {
-                                if (EntriesStore.update-entry(row.id, self.date, self.name, self.category, self.amount)) {
-                                    root.finish-edit();
-                                }
-                            }
-                            cancelled => { root.finish-edit(); }
-                        }
+                    Text {
+                        width: root.date-width;
+                        text: "Date";
+                        font-weight: 700;
+                    }
+                    Text {
+                        horizontal-stretch: 1;
+                        min-width: root.flexible-width;
+                        preferred-width: root.flexible-width;
+                        text: "Name";
+                        font-weight: 700;
+                    }
+                    Text {
+                        horizontal-stretch: 1;
+                        min-width: root.flexible-width;
+                        preferred-width: root.flexible-width;
+                        text: "Category";
+                        font-weight: 700;
+                    }
+                    Text {
+                        width: root.amount-width;
+                        text: "Amount";
+                        font-weight: 700;
+                        horizontal-alignment: right;
                     }
                 }
             }
-        }
 
-        input-row := EntryEditor {
-            enabled: !root.editing;
-            column-spacing: root.column-spacing;
-            date-width: root.date-width;
-            amount-width: root.amount-width;
-            flexible-width: root.flexible-width;
-            submitted => {
-                if (EntriesStore.add-entry(self.date, self.name, self.category, self.amount)) {
-                    self.reset();
+            list := ListView {
+                vertical-stretch: 1;
+
+                // While adding, keep the end of the list (where the new line is) in view as its
+                // height becomes known or grows with added entries.
+                changed content-height => {
+                    if (root.adding) {
+                        root.scroll-to-bottom();
+                    }
+                }
+
+                // One row per entry plus the last one for adding, which takes no space unless
+                // adding. ListView items can't have spacing, so each carries the gap below it.
+                for row in EntriesStore.entries : VerticalLayout {
+                    property <bool> is-new: row.id == EntriesStore.new-entry-id;
+                    padding-bottom: !self.is-new || root.adding ? 3px : 0px;
+
+                    if !is-new && row.id != EntriesStore.editing-id : EntryLine {
+                        entry: row;
+                        dimmed: root.editing;
+                        column-spacing: root.column-spacing;
+                        date-width: root.date-width;
+                        amount-width: root.amount-width;
+                        flexible-width: root.flexible-width;
+                        horizontal-padding: root.line-padding;
+                        double-clicked(column) => { root.start-edit(row.id, column); }
+                    }
+
+                    if row.id == EntriesStore.editing-id : Rectangle {
+                        border-width: 1px;
+                        border-color: Palette.accent-background;
+                        border-radius: 4px;
+
+                        VerticalLayout {
+                            padding: 2px;
+
+                            EntryEditor {
+                                column-spacing: root.column-spacing;
+                                date-width: root.date-width;
+                                amount-width: root.amount-width;
+                                flexible-width: root.flexible-width;
+                                init => {
+                                    self.date = row.date;
+                                    self.name = row.name;
+                                    self.category = row.category;
+                                    self.amount = row.amount;
+                                    self.focus-column(root.edit-column);
+                                }
+                                submitted => {
+                                    if (is-new) {
+                                        // Stay in adding mode for the next entry.
+                                        if (EntriesStore.add-entry(self.date, self.name, self.category, self.amount)) {
+                                            self.reset();
+                                            root.scroll-to-bottom();
+                                        }
+                                    } else if (EntriesStore.update-entry(row.id, self.date, self.name, self.category, self.amount)) {
+                                        root.finish-edit();
+                                    }
+                                }
+                                cancelled => { root.finish-edit(); }
+                            }
+                        }
+                    }
                 }
             }
         }

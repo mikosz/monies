@@ -62,7 +62,11 @@ fn database_path() -> Result<std::path::PathBuf, Box<dyn Error>> {
 struct View {
     window: slint::Weak<MainWindow>,
     date_format: DateFormat,
+    /// One per entry, in the same order as the ledger's, followed by the row for adding a new
+    /// entry (see `EntriesStore.new-entry-id`). Indices of entries are therefore the same here
+    /// as in the ledger.
     rows: Rc<VecModel<EntryRow>>,
+    new_entry_id: SharedString,
     /// Suggestions for `category_query`.
     category_suggestions: Rc<VecModel<SharedString>>,
     /// The text last reported by a category input (on focus or edit), i.e. of the one in use.
@@ -87,7 +91,8 @@ impl View {
 
     fn show_ledger(&self, ledger: &Ledger) {
         let rows = ledger.entries().iter().map(|(id, entry)| self.entry_row(*id, entry, ledger.categories()));
-        self.rows.set_vec(rows.collect::<Vec<_>>());
+        let new_entry = EntryRow { id: self.new_entry_id.clone(), ..Default::default() };
+        self.rows.set_vec(rows.chain([new_entry]).collect::<Vec<_>>());
         self.show_last_date(ledger);
         self.suggest_categories(ledger);
     }
@@ -143,11 +148,13 @@ impl View {
 pub fn run() -> Result<(), Box<dyn Error>> {
     let (store, ledger) = open_store()?;
     let main_window = MainWindow::new()?;
+    let entries_store = main_window.global::<EntriesStore>();
 
     let view = Rc::new(View {
         window: main_window.as_weak(),
         date_format: DateFormat::system(),
         rows: Rc::new(VecModel::default()),
+        new_entry_id: entries_store.get_new_entry_id(),
         category_suggestions: Rc::new(VecModel::default()),
         category_query: RefCell::default(),
     });
@@ -155,7 +162,6 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     view.show_ledger(&ledger);
     let document = Rc::new(RefCell::new(Document::new(ledger, store)));
 
-    let entries_store = main_window.global::<EntriesStore>();
     entries_store.set_date_placeholder(view.date_format.placeholder().into());
     entries_store.set_entries(view.rows.clone().into());
     entries_store.set_category_suggestions(view.category_suggestions.clone().into());

@@ -11,8 +11,10 @@ export global EntriesStore {
     callback update-entry(string, string, string, string, string) -> bool;
 
     // Id of the entry being edited in place, or "" when none is. While editing, everything
-    // else is disabled.
+    // else is disabled. Adding is editing the row with `new-entry-id`.
     in-out property <string> editing-id;
+    // Id of the extra last row of `entries`, used for adding entries.
+    out property <string> new-entry-id: "new";
 
     // Date of the most recently added entry (not the newest date); today before any entry.
     in property <string> last-date;
