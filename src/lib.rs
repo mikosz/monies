@@ -6,6 +6,8 @@ mod currency;
 mod database_writer;
 mod date_format;
 mod document;
+#[cfg_attr(not(test), expect(dead_code, reason = "used by the import UI, a later step"))]
+mod duplicates;
 mod entry;
 mod history;
 mod import;

@@ -58,10 +58,6 @@ pub struct ImportRow {
     pub status: RowStatus,
 }
 
-#[cfg_attr(
-    target_arch = "wasm32",
-    expect(dead_code, reason = "only constructed when loading from a database until there's an import UI")
-)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowStatus {
     /// Not reviewed yet.
