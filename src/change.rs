@@ -1,7 +1,12 @@
+use std::collections::BTreeMap;
+
+use chrono::Utc;
+
 use crate::account::{Account, AccountError, AccountId, Accounts};
 use crate::category::{Categories, CategoryId, CategoryPath};
 use crate::currency::Currency;
 use crate::entry::{Entry, EntryId, ParsedEntry};
+use crate::import::{Import, ImportError, ImportId, ImportRow, RowStatus};
 use crate::ledger::Ledger;
 
 /// A primitive modification of the ledger. Every operation carries enough data to be
@@ -17,6 +22,12 @@ pub enum Op {
     InsertEntry { id: EntryId, entry: Entry },
     DeleteEntry { id: EntryId, entry: Entry },
     UpdateEntry { id: EntryId, before: Entry, after: Entry },
+    /// Inserts a pending import together with its rows.
+    InsertImport { id: ImportId, import: Import },
+    /// Deletes a pending import together with its rows.
+    DeleteImport { id: ImportId, import: Import },
+    /// Replaces the row at `position` of the import's rows.
+    UpdateImportRow { id: ImportId, position: usize, before: ImportRow, after: ImportRow },
 }
 
 impl Op {
@@ -30,6 +41,11 @@ impl Op {
             Op::InsertEntry { id, entry } => Op::DeleteEntry { id, entry },
             Op::DeleteEntry { id, entry } => Op::InsertEntry { id, entry },
             Op::UpdateEntry { id, before, after } => Op::UpdateEntry { id, before: after, after: before },
+            Op::InsertImport { id, import } => Op::DeleteImport { id, import },
+            Op::DeleteImport { id, import } => Op::InsertImport { id, import },
+            Op::UpdateImportRow { id, position, before, after } => {
+                Op::UpdateImportRow { id, position, before: after, after: before }
+            }
         }
     }
 }
@@ -58,9 +74,9 @@ impl Change {
 }
 
 /// Builds a [`Change`] against the ledger, validating it and creating missing categories.
-/// Categories and accounts created or changed earlier in the same change are taken into
-/// account, so e.g. importing many entries into a new category creates it once. Entries are
-/// always those of the ledger, without the ones added by the change.
+/// Categories, accounts and pending imports created or changed earlier in the same change are
+/// taken into account, so e.g. importing many entries into a new category creates it once.
+/// Entries are always those of the ledger, without the ones added by the change.
 pub struct ChangeBuilder<'a> {
     description: String,
     ledger: &'a Ledger,
@@ -68,6 +84,8 @@ pub struct ChangeBuilder<'a> {
     accounts: Accounts,
     /// The current categories plus those created by this change so far.
     categories: Categories,
+    /// The current pending imports as changed by this change so far.
+    imports: BTreeMap<ImportId, Import>,
     ops: Vec<Op>,
 }
 
@@ -78,6 +96,7 @@ impl<'a> ChangeBuilder<'a> {
             ledger,
             accounts: ledger.accounts().clone(),
             categories: ledger.categories().clone(),
+            imports: ledger.imports().map(|(id, import)| (id, import.clone())).collect(),
             ops: Vec::new(),
         }
     }
@@ -115,36 +134,54 @@ impl<'a> ChangeBuilder<'a> {
         self.set_account(id, current.clone(), Account { deleted: false, ..current });
     }
 
-    /// Deletes the account and all its entries. Categories are kept, even if no longer used.
-    /// Panics if there's no such account.
+    /// Deletes the account with all its entries and pending imports. Categories are kept, even
+    /// if no longer used. Panics if there's no such account.
     pub fn delete_account_permanently(&mut self, id: AccountId) {
         let account = self.account(id);
         let ledger = self.ledger;
         for (entry_id, entry) in ledger.account_entries(id) {
             self.ops.push(Op::DeleteEntry { id: *entry_id, entry: entry.clone() });
         }
+        let imports: Vec<ImportId> =
+            self.imports.iter().filter(|(_, import)| import.account == id).map(|(&import_id, _)| import_id).collect();
+        for import_id in imports {
+            self.discard_import(import_id);
+        }
         self.accounts.remove(id);
         self.ops.push(Op::DeleteAccount { id, account });
     }
 
-    /// Adds an entry to `parsed.account`.
+    /// Adds an entry to `parsed.account`, typed in rather than imported.
     pub fn add_entry(&mut self, parsed: ParsedEntry) -> EntryId {
         let category = self.category(&parsed.category);
         let id = EntryId::generate();
-        let entry =
-            Entry { account: parsed.account, date: parsed.date, name: parsed.name, category, amount: parsed.amount };
+        let entry = Entry {
+            account: parsed.account,
+            date: parsed.date,
+            name: parsed.name,
+            category,
+            amount: parsed.amount,
+            statement: None,
+        };
         self.ops.push(Op::InsertEntry { id, entry });
         id
     }
 
     /// Replaces the entry `id`, currently `current`, with the parsed input. Records nothing
     /// when the input doesn't change the entry. A different account moves the entry there;
-    /// the amount is then taken as it is, in the other account's currency.
+    /// the amount is then taken as it is, in the other account's currency. An imported entry
+    /// keeps its statement line.
     pub fn update_entry(&mut self, id: EntryId, current: &Entry, parsed: ParsedEntry) {
         // An unchanged entry keeps its existing category, so no categories are created then.
         let category = self.category(&parsed.category);
-        let after =
-            Entry { account: parsed.account, date: parsed.date, name: parsed.name, category, amount: parsed.amount };
+        let after = Entry {
+            account: parsed.account,
+            date: parsed.date,
+            name: parsed.name,
+            category,
+            amount: parsed.amount,
+            statement: current.statement.clone(),
+        };
         if after != *current {
             self.ops.push(Op::UpdateEntry { id, before: current.clone(), after });
         }
@@ -191,9 +228,76 @@ impl<'a> ChangeBuilder<'a> {
     }
 }
 
+/// Pending imports, reviewed row by row and then submitted or discarded.
+#[cfg_attr(not(test), expect(dead_code, reason = "used by the import UI, a later step"))]
+impl ChangeBuilder<'_> {
+    /// Adds a pending import of statement lines into the account. Panics if there's no such
+    /// account.
+    pub fn add_import(&mut self, account: AccountId, source: &str, rows: Vec<ImportRow>) -> ImportId {
+        assert!(self.accounts.get(account).is_some(), "imported account exists");
+        let id = ImportId::generate();
+        let import = Import { account, created: Utc::now(), source: source.to_owned(), rows };
+        self.imports.insert(id, import.clone());
+        self.ops.push(Op::InsertImport { id, import });
+        id
+    }
+
+    /// Replaces the row at `position` of the import. Records nothing when the row doesn't
+    /// change. Panics if there's no such import or row.
+    pub fn update_import_row(&mut self, id: ImportId, position: usize, row: ImportRow) {
+        let current = &mut self.imports.get_mut(&id).expect("changed import exists").rows[position];
+        if row != *current {
+            let before = std::mem::replace(current, row.clone());
+            self.ops.push(Op::UpdateImportRow { id, position, before, after: row });
+        }
+    }
+
+    /// Drops the import without adding any entries. Panics if there's no such import.
+    pub fn discard_import(&mut self, id: ImportId) {
+        let import = self.imports.remove(&id).expect("discarded import exists");
+        self.ops.push(Op::DeleteImport { id, import });
+    }
+
+    /// Adds an entry to the import's account for every accepted row, in row order, and drops
+    /// the import with the rows that weren't accepted. Entries have the date and amount of
+    /// their statement line and keep the line; missing categories are created. Returns the
+    /// ids of the added entries. Records nothing when an accepted row has an empty name or no
+    /// category. Panics if there's no such import.
+    pub fn submit_import(&mut self, id: ImportId) -> Result<Vec<EntryId>, ImportError> {
+        let import = self.imports.get(&id).expect("submitted import exists");
+        let account = import.account;
+        let accepted = import
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.status == RowStatus::Accepted)
+            .map(|(position, row)| {
+                let name = row.name.trim();
+                if name.is_empty() {
+                    return Err(ImportError::EmptyName { position });
+                }
+                let category = row.category.clone().ok_or(ImportError::MissingCategory { position })?;
+                Ok((name.to_owned(), category, row.line.clone()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut entries = Vec::with_capacity(accepted.len());
+        for (name, category, line) in accepted {
+            let category = self.category(&category);
+            let entry_id = EntryId::generate();
+            let entry = Entry { account, date: line.date, name, category, amount: line.amount, statement: Some(line) };
+            self.ops.push(Op::InsertEntry { id: entry_id, entry });
+            entries.push(entry_id);
+        }
+        self.discard_import(id);
+        Ok(entries)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::import::StatementLine;
     use crate::store::MemoryStore;
 
     fn parsed(account: AccountId, category: &str) -> ParsedEntry {
@@ -201,7 +305,7 @@ mod tests {
     }
 
     fn ledger_with(categories: Categories) -> Ledger {
-        Ledger::new(Accounts::default(), categories, Vec::new())
+        Ledger::new(Accounts::default(), categories, Vec::new(), Vec::new())
     }
 
     fn currency(code: &str) -> Currency {
@@ -293,7 +397,7 @@ mod tests {
     fn entry(categories: &Categories, category: &str, amount: i64) -> Entry {
         let category = categories.find(&CategoryPath::parse(category).unwrap()).unwrap();
         let date = chrono::NaiveDate::from_ymd_opt(2026, 9, 30).unwrap();
-        Entry { account: AccountId::generate(), date, name: "Rent".to_owned(), category, amount }
+        Entry { account: AccountId::generate(), date, name: "Rent".to_owned(), category, amount, statement: None }
     }
 
     #[test]
@@ -477,5 +581,171 @@ mod tests {
         assert_eq!(insert.inverse().inverse(), insert);
         let update = Op::UpdateAccount { id, before: account.clone(), after: deleted.clone() };
         assert_eq!(update.inverse(), Op::UpdateAccount { id, before: deleted, after: account });
+    }
+
+    /// Adds an import of `rows` into `account` to the ledger.
+    fn add_import(ledger: &mut Ledger, account: AccountId, rows: Vec<ImportRow>) -> ImportId {
+        let mut builder = ChangeBuilder::new("Import", ledger);
+        let id = builder.add_import(account, "statement-2026-09.csv", rows);
+        let change = builder.build();
+        ledger.apply(&mut MemoryStore, &change).unwrap();
+        id
+    }
+
+    fn row(text: &str, name: &str, category: &str, status: RowStatus) -> ImportRow {
+        ImportRow::test("2026-09-30", 1250, text, name, category, status)
+    }
+
+    #[test]
+    fn adds_imports() {
+        let (ledger, _, bank) = ledger_with_accounts();
+        let rows = vec![row("CARD PAYMENT CORNER SHOP 0042", "", "", RowStatus::Pending)];
+        let mut builder = ChangeBuilder::new("Import", &ledger);
+        let id = builder.add_import(bank, "Claude", rows.clone());
+        let change = builder.build();
+
+        let [Op::InsertImport { id: inserted, import }] = change.ops.as_slice() else {
+            panic!("unexpected ops: {:?}", change.ops)
+        };
+        assert_eq!(*inserted, id);
+        assert_eq!((import.account, import.source.as_str(), &import.rows), (bank, "Claude", &rows));
+    }
+
+    #[test]
+    fn submits_accepted_rows_in_order_into_the_imports_account() {
+        let (mut ledger, _, bank) = ledger_with_accounts();
+        let rows = vec![
+            row("CARD PAYMENT CORNER SHOP 0042", " Groceries ", "food.shop", RowStatus::Accepted),
+            row("CARD PAYMENT BAKERY 0007", "Bread", "food.bakery", RowStatus::Pending),
+            row("TRANSFER FLAT 12", "Rent", "BILLS", RowStatus::Accepted),
+            row("CARD PAYMENT CORNER SHOP 0043", "Snacks", "Food.Shop", RowStatus::Accepted),
+            row("CARD PAYMENT CORNER SHOP 0042", "Groceries", "food.shop", RowStatus::Skipped),
+        ];
+        let id = add_import(&mut ledger, bank, rows.clone());
+        let import = ledger.import(id).unwrap().clone();
+
+        let mut builder = ChangeBuilder::new("Submit", &ledger);
+        let entry_ids = builder.submit_import(id).unwrap();
+        let change = builder.build();
+
+        assert_eq!(inserted_categories(&change), ["food", "shop"], "created once, the existing bills reused");
+        let entries: Vec<(EntryId, &Entry)> = change
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::InsertEntry { id, entry } => Some((*id, entry)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(entries.iter().map(|(id, _)| *id).collect::<Vec<_>>(), entry_ids);
+        let names: Vec<&str> = entries.iter().map(|(_, entry)| entry.name.as_str()).collect();
+        assert_eq!(names, ["Groceries", "Rent", "Snacks"], "accepted rows in row order, names trimmed");
+        let statements: Vec<Option<&StatementLine>> = entries.iter().map(|(_, entry)| entry.statement.as_ref()).collect();
+        assert_eq!(statements, [Some(&rows[0].line), Some(&rows[2].line), Some(&rows[3].line)]);
+        assert!(entries.iter().all(|(_, entry)| entry.account == bank && entry.date == rows[0].line.date && entry.amount == 1250));
+        assert_eq!(entries[0].1.category, entries[2].1.category);
+        assert_eq!(change.ops.last(), Some(&Op::DeleteImport { id, import }), "the import is dropped last");
+    }
+
+    #[test]
+    fn submit_refuses_accepted_rows_without_name_or_category() {
+        let (mut ledger, cash, _) = ledger_with_accounts();
+        let unnamed = add_import(&mut ledger, cash, vec![
+            row("CARD PAYMENT CORNER SHOP 0042", "", "", RowStatus::Pending),
+            row("CARD PAYMENT BAKERY 0007", "Bread", "food", RowStatus::Accepted),
+            row("TRANSFER FLAT 12", "  ", "bills", RowStatus::Accepted),
+        ]);
+        let uncategorised = add_import(&mut ledger, cash, vec![
+            row("CARD PAYMENT CORNER SHOP 0042", "Groceries", "", RowStatus::Skipped),
+            row("CARD PAYMENT BAKERY 0007", "Bread", "", RowStatus::Accepted),
+        ]);
+
+        let mut builder = ChangeBuilder::new("Submit", &ledger);
+        assert_eq!(builder.submit_import(unnamed), Err(ImportError::EmptyName { position: 2 }));
+        assert_eq!(builder.submit_import(uncategorised), Err(ImportError::MissingCategory { position: 1 }));
+        assert!(builder.build().is_empty(), "no categories are created either");
+        assert_eq!(ImportError::EmptyName { position: 2 }.to_string(), "row 3: name must not be empty");
+    }
+
+    #[test]
+    fn import_row_updates_build_on_each_other() {
+        let (mut ledger, cash, _) = ledger_with_accounts();
+        let pending = row("CARD PAYMENT CORNER SHOP 0042", "", "", RowStatus::Pending);
+        let id = add_import(&mut ledger, cash, vec![pending.clone()]);
+        let named = ImportRow { name: "Groceries".to_owned(), ..pending.clone() };
+        let accepted = ImportRow { status: RowStatus::Accepted, ..named.clone() };
+
+        let mut builder = ChangeBuilder::new("Review", &ledger);
+        builder.update_import_row(id, 0, pending.clone());
+        builder.update_import_row(id, 0, named.clone());
+        builder.update_import_row(id, 0, named.clone());
+        builder.update_import_row(id, 0, accepted.clone());
+        let change = builder.build();
+
+        assert_eq!(
+            change.ops,
+            [
+                Op::UpdateImportRow { id, position: 0, before: pending, after: named.clone() },
+                Op::UpdateImportRow { id, position: 0, before: named, after: accepted },
+            ],
+            "unchanged rows record nothing"
+        );
+    }
+
+    #[test]
+    fn update_keeps_statement_line() {
+        let mut categories = Categories::default();
+        categories.insert(CategoryId::generate(), "bills".to_owned(), None);
+        let line = row("TRANSFER FLAT 12", "Rent", "bills", RowStatus::Accepted).line;
+        let current = Entry { statement: Some(line), ..entry(&categories, "bills", 100) };
+        let ledger = ledger_with(categories);
+
+        let id = EntryId::generate();
+        let mut builder = ChangeBuilder::new("Edit", &ledger);
+        builder.update_entry(id, &current, ParsedEntry::test(current.account, "2026-09-30", "Rent", "bills", "1"));
+        builder.update_entry(id, &current, ParsedEntry::test(current.account, "2026-10-01", "Flat", "bills", "2"));
+        let change = builder.build();
+
+        let [Op::UpdateEntry { after, .. }] = change.ops.as_slice() else {
+            panic!("unexpected ops: {:?}", change.ops)
+        };
+        assert_eq!((after.name.as_str(), after.amount), ("Flat", 200));
+        assert_eq!(after.statement, current.statement);
+    }
+
+    #[test]
+    fn deleting_account_permanently_deletes_its_imports() {
+        let (mut ledger, cash, bank) = ledger_with_accounts();
+        let import_id = add_import(&mut ledger, cash, vec![row("TRANSFER FLAT 12", "Rent", "bills", RowStatus::Accepted)]);
+        add_import(&mut ledger, bank, vec![row("CARD PAYMENT BAKERY 0007", "Bread", "food", RowStatus::Pending)]);
+
+        let mut builder = ChangeBuilder::new("Delete permanently", &ledger);
+        builder.delete_account_permanently(cash);
+        let change = builder.build();
+        let (entry_id, entry) = ledger.entries()[0].clone();
+        let import = ledger.import(import_id).unwrap().clone();
+        let account = ledger.accounts().get(cash).unwrap().clone();
+        assert_eq!(
+            change.ops,
+            [
+                Op::DeleteEntry { id: entry_id, entry },
+                Op::DeleteImport { id: import_id, import },
+                Op::DeleteAccount { id: cash, account }
+            ],
+            "only the account's imports"
+        );
+    }
+
+    #[test]
+    fn import_inverses() {
+        let (id, rows) = (ImportId::generate(), vec![row("TRANSFER FLAT 12", "Rent", "bills", RowStatus::Pending)]);
+        let import = Import { account: AccountId::generate(), created: Utc::now(), source: "Claude".to_owned(), rows };
+        let (before, after) = (import.rows[0].clone(), ImportRow { status: RowStatus::Skipped, ..import.rows[0].clone() });
+
+        let insert = Op::InsertImport { id, import: import.clone() };
+        assert_eq!(insert.inverse(), Op::DeleteImport { id, import });
+        assert_eq!(insert.inverse().inverse(), insert);
+        let update = Op::UpdateImportRow { id, position: 0, before: before.clone(), after: after.clone() };
+        assert_eq!(update.inverse(), Op::UpdateImportRow { id, position: 0, before: after, after: before });
     }
 }

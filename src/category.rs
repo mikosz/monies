@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fmt;
 
 use uuid::Uuid;
 
@@ -41,6 +42,13 @@ impl CategoryPath {
 
     pub fn names(&self) -> &[String] {
         &self.0
+    }
+}
+
+/// The names joined by [`SEPARATOR`], which [`CategoryPath::parse`] reads back as the same path.
+impl fmt::Display for CategoryPath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0.join(&SEPARATOR.to_string()))
     }
 }
 
@@ -219,6 +227,13 @@ mod tests {
         for input in ["", "  ", ".", "...", " . "] {
             assert_eq!(CategoryPath::parse(input), None, "input: {input:?}");
         }
+    }
+
+    #[test]
+    fn displays_paths_as_parsed_back() {
+        let pills = path(" Dogs . health..pills ");
+        assert_eq!(pills.to_string(), "Dogs.health.pills");
+        assert_eq!(path(&pills.to_string()), pills);
     }
 
     #[test]

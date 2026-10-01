@@ -1,15 +1,18 @@
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::Path;
 
+use chrono::NaiveDate;
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, ValueRef};
 use rusqlite::{Connection, ToSql, Transaction, params};
 
 use super::Store;
 use crate::account::{Account, AccountId, Accounts};
-use crate::category::{Categories, CategoryId};
+use crate::category::{Categories, CategoryId, CategoryPath};
 use crate::change::{Change, Op};
 use crate::currency::Currency;
 use crate::entry::{Entry, EntryId};
+use crate::import::{Import, ImportId, ImportRow, RowStatus, StatementLine};
 use crate::ledger::Ledger;
 
 /// Schema migrations; the database's `user_version` is the number of migrations applied.
@@ -18,6 +21,10 @@ const MIGRATIONS: &[&str] = &[
     // 1: initial schema. Ids are UUIDv7 as 16-byte BLOBs, so they sort by creation. Dates are
     // ISO `YYYY-MM-DD` text, currencies ISO 4217 codes, amounts are in minor units of their
     // account's currency (e.g. cents). Deleted accounts are in the trash, restorable.
+    // Imported entries keep the bank's statement line in the `statement_` columns, all NULL
+    // for entries typed in. Pending imports are `imports` with their `import_rows` in
+    // statement order; a row's category is a path such as `dogs.health`, NULL when missing.
+    // Timestamps are UTC, `YYYY-MM-DD HH:MM:SS.fffffffff+00:00`.
     "CREATE TABLE accounts (
         id       BLOB PRIMARY KEY CHECK (length(id) = 16),
         name     TEXT NOT NULL CHECK (name <> ''),
@@ -33,16 +40,45 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX categories_parent ON categories(parent_id);
 
     CREATE TABLE entries (
-        id          BLOB PRIMARY KEY CHECK (length(id) = 16),
-        account_id  BLOB NOT NULL REFERENCES accounts(id),
-        date        TEXT NOT NULL CHECK (date IS date(date)),
-        name        TEXT NOT NULL,
-        category_id BLOB NOT NULL REFERENCES categories(id),
-        amount      INTEGER NOT NULL
+        id                  BLOB PRIMARY KEY CHECK (length(id) = 16),
+        account_id          BLOB NOT NULL REFERENCES accounts(id),
+        date                TEXT NOT NULL CHECK (date IS date(date)),
+        name                TEXT NOT NULL,
+        category_id         BLOB NOT NULL REFERENCES categories(id),
+        amount              INTEGER NOT NULL,
+        statement_date      TEXT CHECK (statement_date IS date(statement_date)),
+        statement_amount    INTEGER,
+        statement_text      TEXT,
+        statement_reference TEXT,
+        -- A statement line is complete or absent; only its reference is optional.
+        CHECK ((statement_date IS NULL) = (statement_amount IS NULL)
+            AND (statement_date IS NULL) = (statement_text IS NULL)
+            AND (statement_reference IS NULL OR statement_date IS NOT NULL))
     );
     CREATE INDEX entries_account ON entries(account_id);
     CREATE INDEX entries_date ON entries(date);
-    CREATE INDEX entries_category ON entries(category_id);",
+    CREATE INDEX entries_category ON entries(category_id);
+
+    CREATE TABLE imports (
+        id         BLOB PRIMARY KEY CHECK (length(id) = 16),
+        account_id BLOB NOT NULL REFERENCES accounts(id),
+        created    TEXT NOT NULL CHECK (datetime(created) IS NOT NULL),
+        source     TEXT NOT NULL
+    );
+    CREATE INDEX imports_account ON imports(account_id);
+
+    CREATE TABLE import_rows (
+        import_id BLOB NOT NULL REFERENCES imports(id),
+        position  INTEGER NOT NULL CHECK (position >= 0),
+        date      TEXT NOT NULL CHECK (date IS date(date)),
+        amount    INTEGER NOT NULL,
+        text      TEXT NOT NULL,
+        reference TEXT,
+        name      TEXT NOT NULL,
+        category  TEXT CHECK (category <> ''),
+        status    TEXT NOT NULL CHECK (status IN ('pending', 'accepted', 'skipped')),
+        PRIMARY KEY (import_id, position)
+    );",
 ];
 
 #[derive(Debug)]
@@ -116,7 +152,7 @@ impl SqliteStore {
         Ok(Self { connection })
     }
 
-    /// Reads all accounts, categories and entries.
+    /// Reads all accounts, categories, entries and pending imports.
     pub fn load(&self) -> Result<Ledger, StorageError> {
         let mut accounts = Accounts::default();
         let mut statement = self.connection.prepare("SELECT id, name, currency, deleted FROM accounts")?;
@@ -139,22 +175,58 @@ impl SqliteStore {
             categories.insert(id, name, parent);
         }
 
-        let mut statement =
-            self.connection.prepare("SELECT id, account_id, date, name, category_id, amount FROM entries")?;
+        let mut statement = self.connection.prepare(
+            "SELECT id, account_id, date, name, category_id, amount,
+                    statement_date, statement_amount, statement_text, statement_reference
+             FROM entries",
+        )?;
         let entries = statement
             .query_map([], |row| {
+                // The schema ensures the statement line is complete or absent.
+                let statement = match (row.get::<_, Option<NaiveDate>>(6)?, row.get(7)?, row.get(8)?) {
+                    (Some(date), Some(amount), Some(text)) => {
+                        Some(StatementLine { date, amount, text, reference: row.get(9)? })
+                    }
+                    _ => None,
+                };
                 let entry = Entry {
                     account: AccountId(row.get(1)?),
                     date: row.get(2)?,
                     name: row.get(3)?,
                     category: CategoryId(row.get(4)?),
                     amount: row.get(5)?,
+                    statement,
                 };
                 Ok((EntryId(row.get(0)?), entry))
             })?
             .collect::<Result<Vec<_>, _>>()?;
 
-        Ok(Ledger::new(accounts, categories, entries))
+        // Rows are only ever inserted with their import, so their positions are 0, 1, 2, ...
+        let mut rows: BTreeMap<ImportId, Vec<ImportRow>> = BTreeMap::new();
+        let mut statement = self.connection.prepare(
+            "SELECT import_id, date, amount, text, reference, name, category, status
+             FROM import_rows ORDER BY import_id, position",
+        )?;
+        let loaded = statement.query_map([], |row| {
+            let line = StatementLine { date: row.get(1)?, amount: row.get(2)?, text: row.get(3)?, reference: row.get(4)? };
+            let import_row = ImportRow { line, name: row.get(5)?, category: row.get(6)?, status: row.get(7)? };
+            Ok((ImportId(row.get(0)?), import_row))
+        })?;
+        for row in loaded {
+            let (id, row) = row?;
+            rows.entry(id).or_default().push(row);
+        }
+
+        let mut statement = self.connection.prepare("SELECT id, account_id, created, source FROM imports")?;
+        let imports = statement
+            .query_map([], |row| {
+                let id = ImportId(row.get(0)?);
+                let rows = rows.remove(&id).unwrap_or_default();
+                Ok((id, Import { account: AccountId(row.get(1)?), created: row.get(2)?, source: row.get(3)?, rows }))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(Ledger::new(accounts, categories, entries, imports))
     }
 }
 
@@ -207,9 +279,23 @@ fn apply_op(transaction: &Transaction, op: &Op) -> Result<(), StorageError> {
             }
         }
         Op::InsertEntry { id, entry } => {
+            let statement = entry.statement.as_ref();
             transaction.execute(
-                "INSERT INTO entries (id, account_id, date, name, category_id, amount) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![id.0, entry.account.0, entry.date, entry.name, entry.category.0, entry.amount],
+                "INSERT INTO entries (id, account_id, date, name, category_id, amount,
+                     statement_date, statement_amount, statement_text, statement_reference)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    id.0,
+                    entry.account.0,
+                    entry.date,
+                    entry.name,
+                    entry.category.0,
+                    entry.amount,
+                    statement.map(|line| line.date),
+                    statement.map(|line| line.amount),
+                    statement.map(|line| &line.text),
+                    statement.and_then(|line| line.reference.as_ref()),
+                ],
             )?;
         }
         Op::DeleteEntry { id, .. } => {
@@ -219,12 +305,80 @@ fn apply_op(transaction: &Transaction, op: &Op) -> Result<(), StorageError> {
             }
         }
         Op::UpdateEntry { id, after, .. } => {
+            let statement = after.statement.as_ref();
             let updated = transaction.execute(
-                "UPDATE entries SET account_id = ?2, date = ?3, name = ?4, category_id = ?5, amount = ?6 WHERE id = ?1",
-                params![id.0, after.account.0, after.date, after.name, after.category.0, after.amount],
+                "UPDATE entries SET account_id = ?2, date = ?3, name = ?4, category_id = ?5, amount = ?6,
+                     statement_date = ?7, statement_amount = ?8, statement_text = ?9, statement_reference = ?10
+                 WHERE id = ?1",
+                params![
+                    id.0,
+                    after.account.0,
+                    after.date,
+                    after.name,
+                    after.category.0,
+                    after.amount,
+                    statement.map(|line| line.date),
+                    statement.map(|line| line.amount),
+                    statement.map(|line| &line.text),
+                    statement.and_then(|line| line.reference.as_ref()),
+                ],
             )?;
             if updated != 1 {
                 return Err(StorageError::MissingRow { table: "entries" });
+            }
+        }
+        Op::InsertImport { id, import } => {
+            transaction.execute(
+                "INSERT INTO imports (id, account_id, created, source) VALUES (?1, ?2, ?3, ?4)",
+                params![id.0, import.account.0, import.created, import.source],
+            )?;
+            for (position, row) in import.rows.iter().enumerate() {
+                transaction.execute(
+                    "INSERT INTO import_rows (import_id, position, date, amount, text, reference, name, category, status)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    params![
+                        id.0,
+                        position as i64,
+                        row.line.date,
+                        row.line.amount,
+                        row.line.text,
+                        row.line.reference,
+                        row.name,
+                        row.category,
+                        row.status,
+                    ],
+                )?;
+            }
+        }
+        Op::DeleteImport { id, import } => {
+            let deleted = transaction.execute("DELETE FROM import_rows WHERE import_id = ?1", params![id.0])?;
+            if deleted != import.rows.len() {
+                return Err(StorageError::MissingRow { table: "import_rows" });
+            }
+            let deleted = transaction.execute("DELETE FROM imports WHERE id = ?1", params![id.0])?;
+            if deleted != 1 {
+                return Err(StorageError::MissingRow { table: "imports" });
+            }
+        }
+        Op::UpdateImportRow { id, position, after, .. } => {
+            let updated = transaction.execute(
+                "UPDATE import_rows SET date = ?3, amount = ?4, text = ?5, reference = ?6, name = ?7, category = ?8,
+                     status = ?9
+                 WHERE import_id = ?1 AND position = ?2",
+                params![
+                    id.0,
+                    *position as i64,
+                    after.line.date,
+                    after.line.amount,
+                    after.line.text,
+                    after.line.reference,
+                    after.name,
+                    after.category,
+                    after.status,
+                ],
+            )?;
+            if updated != 1 {
+                return Err(StorageError::MissingRow { table: "import_rows" });
             }
         }
     }
@@ -242,6 +396,43 @@ impl FromSql for Currency {
     fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
         let code = value.as_str()?;
         Currency::parse(code).ok_or_else(|| FromSqlError::Other(format!("invalid currency code {code:?}").into()))
+    }
+}
+
+/// Category paths are stored as text such as `dogs.health`.
+impl ToSql for CategoryPath {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        Ok(self.to_string().into())
+    }
+}
+
+impl FromSql for CategoryPath {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        let path = value.as_str()?;
+        CategoryPath::parse(path).ok_or_else(|| FromSqlError::Other(format!("invalid category path {path:?}").into()))
+    }
+}
+
+/// Row statuses are stored as lowercase text.
+impl ToSql for RowStatus {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        let status = match self {
+            RowStatus::Pending => "pending",
+            RowStatus::Accepted => "accepted",
+            RowStatus::Skipped => "skipped",
+        };
+        Ok(status.into())
+    }
+}
+
+impl FromSql for RowStatus {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        match value.as_str()? {
+            "pending" => Ok(RowStatus::Pending),
+            "accepted" => Ok(RowStatus::Accepted),
+            "skipped" => Ok(RowStatus::Skipped),
+            status => Err(FromSqlError::Other(format!("invalid import row status {status:?}").into())),
+        }
     }
 }
 
@@ -534,5 +725,180 @@ mod tests {
         for currency in ["pln", "PL", "PLNN", "P1N", ""] {
             assert!(insert(currency).is_err(), "currency: {currency:?}");
         }
+    }
+
+    /// Rows of an import, one with a reference and one with a missing category.
+    fn import_rows() -> Vec<ImportRow> {
+        let mut groceries = ImportRow::test("2026-09-30", 1250, "CARD PAYMENT CORNER SHOP 0042", "Groceries", "food.shop", RowStatus::Accepted);
+        groceries.line.reference = Some("TX-0001".to_owned());
+        vec![
+            groceries,
+            ImportRow::test("2026-09-30", -240000, "SALARY FICTIONAL LTD", "Salary", "income", RowStatus::Accepted),
+            ImportRow::test("2026-10-01", 500, "CARD PAYMENT BAKERY 0007", "", "", RowStatus::Pending),
+            ImportRow::test("2026-10-01", 9, "BANK FEE", "Fee", "bills", RowStatus::Skipped),
+        ]
+    }
+
+    fn add_import(ledger: &mut Ledger, store: &mut SqliteStore, account: AccountId) -> (Change, ImportId) {
+        let mut id = None;
+        let change =
+            perform(ledger, store, |builder| id = Some(builder.add_import(account, "statement-2026-09.csv", import_rows()))).unwrap();
+        (change, id.unwrap())
+    }
+
+    fn imports(ledger: &Ledger) -> Vec<(ImportId, Import)> {
+        ledger.imports().map(|(id, import)| (id, import.clone())).collect()
+    }
+
+    #[test]
+    fn saves_reviews_and_discards_imports_and_back() {
+        let (mut store, mut ledger, account) = with_account();
+        let (add, id) = add_import(&mut ledger, &mut store, account);
+        assert_eq!(imports(&store.load().unwrap()), imports(&ledger));
+        assert_eq!(count(&store, "import_rows"), 4);
+        let added = imports(&ledger);
+
+        let row = ImportRow { name: "Bread".to_owned(), ..ledger.import(id).unwrap().rows[2].clone() };
+        let review = perform(&mut ledger, &mut store, |builder| builder.update_import_row(id, 2, row)).unwrap();
+        assert_eq!(imports(&store.load().unwrap()), imports(&ledger));
+        ledger.apply(&mut store, &review.inverse()).unwrap();
+        assert_eq!(imports(&store.load().unwrap()), added);
+
+        let discard = perform(&mut ledger, &mut store, |builder| builder.discard_import(id)).unwrap();
+        assert_eq!((count(&store, "imports"), count(&store, "import_rows")), (0, 0));
+        ledger.apply(&mut store, &discard.inverse()).unwrap();
+        assert_eq!(imports(&store.load().unwrap()), added);
+
+        ledger.apply(&mut store, &add.inverse()).unwrap();
+        assert_eq!((count(&store, "imports"), count(&store, "import_rows")), (0, 0));
+    }
+
+    #[test]
+    fn submitted_entries_keep_their_statement_lines() {
+        let (mut store, mut ledger, account) = with_account();
+        add(&mut ledger, &mut store, account, &[("2026-09-29", "Rent", "bills", "1")]).unwrap();
+        let (_, id) = add_import(&mut ledger, &mut store, account);
+
+        perform(&mut ledger, &mut store, |builder| {
+            builder.submit_import(id).unwrap();
+        })
+        .unwrap();
+        let loaded = store.load().unwrap();
+        assert_eq!(loaded.entries(), ledger.entries());
+        let references: Vec<Option<&str>> =
+            loaded.entries().iter().map(|(_, e)| e.statement.as_ref().and_then(|line| line.reference.as_deref())).collect();
+        assert_eq!(references, [None, Some("TX-0001"), None]);
+        assert!(loaded.entries()[2].1.statement.is_some(), "a statement line without a reference");
+        assert_eq!((count(&store, "imports"), count(&store, "import_rows")), (0, 0));
+
+        let (entry_id, current) = ledger.entries()[1].clone();
+        let parsed = ParsedEntry::test(account, "2026-10-02", "Shopping", "food", "13");
+        perform(&mut ledger, &mut store, |builder| builder.update_entry(entry_id, &current, parsed)).unwrap();
+        let loaded = store.load().unwrap();
+        assert_eq!(loaded.entries(), ledger.entries());
+        assert_eq!(loaded.entry(entry_id).unwrap().statement, current.statement, "editing keeps the statement line");
+    }
+
+    #[test]
+    fn undoing_submit_restores_import() {
+        let (mut store, mut ledger, account) = with_account();
+        let (_, id) = add_import(&mut ledger, &mut store, account);
+        let pending = imports(&ledger);
+
+        let submit = perform(&mut ledger, &mut store, |builder| {
+            builder.submit_import(id).unwrap();
+        })
+        .unwrap();
+        assert_eq!((count(&store, "entries"), count(&store, "categories")), (2, 3));
+
+        ledger.apply(&mut store, &submit.inverse()).unwrap();
+        assert_eq!((count(&store, "entries"), count(&store, "categories")), (0, 0));
+        assert_eq!(imports(&store.load().unwrap()), pending, "with its row statuses");
+    }
+
+    #[test]
+    fn deletes_account_with_imports_permanently_and_back() {
+        let (mut store, mut ledger, cash) = with_account();
+        let bank = add_account(&mut ledger, &mut store, "Bank", "EUR");
+        add_import(&mut ledger, &mut store, cash);
+        add_import(&mut ledger, &mut store, bank);
+        let all = imports(&ledger);
+
+        let change = perform(&mut ledger, &mut store, |builder| builder.delete_account_permanently(cash)).unwrap();
+        assert_eq!((count(&store, "accounts"), count(&store, "imports"), count(&store, "import_rows")), (1, 1, 4));
+
+        ledger.apply(&mut store, &change.inverse()).unwrap();
+        assert_eq!(imports(&store.load().unwrap()), all);
+    }
+
+    #[test]
+    fn discarding_import_with_missing_rows_fails() {
+        let (mut store, mut ledger, account) = with_account();
+        let (_, id) = add_import(&mut ledger, &mut store, account);
+        store.connection.execute_batch("DELETE FROM import_rows WHERE position = 3").unwrap();
+
+        let mut builder = ChangeBuilder::new("Discard", &ledger);
+        builder.discard_import(id);
+        assert!(matches!(store.apply(&builder.build()), Err(StorageError::MissingRow { table: "import_rows" })));
+        assert_eq!(count(&store, "import_rows"), 3, "nothing was deleted");
+    }
+
+    #[test]
+    fn rejects_incomplete_statement_lines() {
+        let (store, ..) = with_account();
+        let (account, bills) = (store.load().unwrap().accounts().iter().next().unwrap().0, Uuid::now_v7());
+        store.connection.execute("INSERT INTO categories (id, name) VALUES (?1, 'bills')", params![bills]).unwrap();
+        let insert = |date: Option<&str>, amount: Option<i64>, text: Option<&str>, reference: Option<&str>| {
+            store.connection.execute(
+                "INSERT INTO entries (id, account_id, date, name, category_id, amount,
+                     statement_date, statement_amount, statement_text, statement_reference)
+                 VALUES (?1, ?2, '2026-10-01', 'x', ?3, 1, ?4, ?5, ?6, ?7)",
+                params![Uuid::now_v7(), account.0, bills, date, amount, text, reference],
+            )
+        };
+        assert!(insert(None, None, None, None).is_ok());
+        assert!(insert(Some("2026-10-01"), Some(1), Some("BANK FEE"), None).is_ok());
+        assert!(insert(Some("2026-10-01"), Some(1), Some("BANK FEE"), Some("TX-0001")).is_ok());
+        assert!(insert(Some("2026-10-01"), Some(1), None, None).is_err(), "text missing");
+        assert!(insert(Some("2026-10-01"), None, Some("BANK FEE"), None).is_err(), "amount missing");
+        assert!(insert(None, Some(1), Some("BANK FEE"), None).is_err(), "date missing");
+        assert!(insert(None, None, None, Some("TX-0001")).is_err(), "a reference needs a statement line");
+        assert!(insert(Some("2026-02-30"), Some(1), Some("BANK FEE"), None).is_err(), "invalid date");
+    }
+
+    #[test]
+    fn rejects_invalid_imports() {
+        let (store, ..) = with_account();
+        let account = store.load().unwrap().accounts().iter().next().unwrap().0;
+        let import = |created: &str| {
+            let id = Uuid::now_v7();
+            store
+                .connection
+                .execute(
+                    "INSERT INTO imports (id, account_id, created, source) VALUES (?1, ?2, ?3, 'Claude')",
+                    params![id, account.0, created],
+                )
+                .map(|_| id)
+        };
+        let id = import("2026-10-01 12:30:00.123456789+00:00").unwrap();
+        assert!(import("yesterday").is_err());
+        assert!(import("").is_err());
+
+        let row = |position: i64, date: &str, category: Option<&str>, status: &str| {
+            store.connection.execute(
+                "INSERT INTO import_rows (import_id, position, date, amount, text, name, category, status)
+                 VALUES (?1, ?2, ?3, 1, 'BANK FEE', '', ?4, ?5)",
+                params![id, position, date, category, status],
+            )
+        };
+        assert!(row(0, "2026-10-01", None, "pending").is_ok());
+        assert!(row(1, "2026-10-01", Some("bills.fees"), "accepted").is_ok());
+        assert!(row(2, "2026-10-01", None, "skipped").is_ok());
+        assert!(row(0, "2026-10-01", None, "pending").is_err(), "positions are unique");
+        assert!(row(3, "2026-10-01", None, "Pending").is_err(), "status");
+        assert!(row(3, "2026-10-01", None, "").is_err(), "status");
+        assert!(row(3, "2026-02-30", None, "pending").is_err(), "date");
+        assert!(row(3, "2026-10-01", Some(""), "pending").is_err(), "category");
+        assert!(row(-1, "2026-10-01", None, "pending").is_err(), "position");
     }
 }

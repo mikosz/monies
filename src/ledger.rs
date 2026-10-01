@@ -1,23 +1,33 @@
+use std::collections::BTreeMap;
+
 use crate::account::{AccountId, Accounts};
 use crate::category::Categories;
 use crate::change::{Change, Op};
 use crate::entry::{Entry, EntryId};
+use crate::import::{Import, ImportId};
 use crate::store::Store;
 
-/// All of the user's data: entries and the accounts and categories they refer to.
+/// All of the user's data: entries and the accounts and categories they refer to, and pending
+/// imports.
 #[derive(Debug, Default)]
 pub struct Ledger {
     accounts: Accounts,
     categories: Categories,
     /// Sorted by id, which is the order in which entries were added.
     entries: Vec<(EntryId, Entry)>,
+    imports: BTreeMap<ImportId, Import>,
 }
 
 impl Ledger {
     #[cfg_attr(target_arch = "wasm32", expect(dead_code, reason = "only used when loading from a database"))]
-    pub fn new(accounts: Accounts, categories: Categories, mut entries: Vec<(EntryId, Entry)>) -> Self {
+    pub fn new(
+        accounts: Accounts,
+        categories: Categories,
+        mut entries: Vec<(EntryId, Entry)>,
+        imports: Vec<(ImportId, Import)>,
+    ) -> Self {
         entries.sort_by_key(|(id, _)| *id);
-        Self { accounts, categories, entries }
+        Self { accounts, categories, entries, imports: imports.into_iter().collect() }
     }
 
     pub fn accounts(&self) -> &Accounts {
@@ -53,6 +63,16 @@ impl Ledger {
         self.index_of(id).ok().map(|index| &self.entries[index].1)
     }
 
+    /// Pending imports, including those of deleted accounts, in the order they were created.
+    pub fn imports(&self) -> impl Iterator<Item = (ImportId, &Import)> {
+        self.imports.iter().map(|(&id, import)| (id, import))
+    }
+
+    #[cfg_attr(not(test), expect(dead_code, reason = "used by the import UI, a later step"))]
+    pub fn import(&self, id: ImportId) -> Option<&Import> {
+        self.imports.get(&id)
+    }
+
     /// Applies a change to the store and then, once that succeeded, to the ledger.
     pub fn apply<S: Store>(&mut self, store: &mut S, change: &Change) -> Result<(), S::Error> {
         store.apply(change)?;
@@ -81,6 +101,17 @@ impl Ledger {
                 let index = self.index_of(*id).expect("updated entry exists");
                 self.entries[index].1 = after.clone();
             }
+            Op::InsertImport { id, import } => {
+                let previous = self.imports.insert(*id, import.clone());
+                assert!(previous.is_none(), "import ids are unique");
+            }
+            Op::DeleteImport { id, .. } => {
+                self.imports.remove(id).expect("deleted import exists");
+            }
+            Op::UpdateImportRow { id, position, after, .. } => {
+                let import = self.imports.get_mut(id).expect("updated import exists");
+                import.rows[*position] = after.clone();
+            }
         }
     }
 
@@ -106,6 +137,7 @@ mod tests {
     use super::*;
     use crate::change::ChangeBuilder;
     use crate::entry::ParsedEntry;
+    use crate::import::{ImportRow, RowStatus};
     use crate::store::MemoryStore;
 
     fn parsed(account: AccountId, category: &str, amount: &str) -> ParsedEntry {
@@ -243,5 +275,85 @@ mod tests {
         ledger.apply(&mut MemoryStore, &change.inverse()).unwrap();
         assert_eq!(ledger.entries(), entries, "undo puts the entries back in place");
         assert!(ledger.accounts().get(cash).is_some());
+    }
+
+    fn imports(ledger: &Ledger) -> Vec<(ImportId, Import)> {
+        ledger.imports().map(|(id, import)| (id, import.clone())).collect()
+    }
+
+    /// Adds an import into `account` with rows of the given texts, names, categories and
+    /// statuses.
+    fn add_import(ledger: &mut Ledger, account: AccountId, rows: &[(&str, &str, &str, RowStatus)]) -> ImportId {
+        let rows = rows
+            .iter()
+            .map(|&(text, name, category, status)| ImportRow::test("2026-09-30", 1250, text, name, category, status))
+            .collect();
+        let mut id = None;
+        perform(ledger, |builder| id = Some(builder.add_import(account, "statement-2026-09.csv", rows)));
+        id.unwrap()
+    }
+
+    #[test]
+    fn adds_reviews_and_discards_imports_and_back() {
+        let mut ledger = Ledger::default();
+        let account = ledger.add_test_account("Cash");
+        let first = add_import(&mut ledger, account, &[("CARD PAYMENT CORNER SHOP 0042", "", "", RowStatus::Pending)]);
+        let second = add_import(&mut ledger, account, &[("CARD PAYMENT BAKERY 0007", "", "", RowStatus::Pending)]);
+        assert_eq!(ledger.imports().map(|(id, _)| id).collect::<Vec<_>>(), [first, second], "in the order added");
+        let added = imports(&ledger);
+
+        let row = ImportRow { name: "Groceries".to_owned(), ..ledger.import(first).unwrap().rows[0].clone() };
+        let review = perform(&mut ledger, |builder| builder.update_import_row(first, 0, row.clone()));
+        assert_eq!(ledger.import(first).unwrap().rows, [row]);
+        ledger.apply(&mut MemoryStore, &review.inverse()).unwrap();
+        assert_eq!(imports(&ledger), added, "undo restores the row");
+
+        let discard = perform(&mut ledger, |builder| builder.discard_import(first));
+        assert_eq!(ledger.imports().map(|(id, _)| id).collect::<Vec<_>>(), [second]);
+        ledger.apply(&mut MemoryStore, &discard.inverse()).unwrap();
+        assert_eq!(imports(&ledger), added, "undo restores the import");
+    }
+
+    #[test]
+    fn submits_imports_and_back() {
+        let mut ledger = Ledger::default();
+        let account = ledger.add_test_account("Cash");
+        add(&mut ledger, account, "bills");
+        let id = add_import(&mut ledger, account, &[
+            ("CARD PAYMENT CORNER SHOP 0042", "Groceries", "food.shop", RowStatus::Accepted),
+            ("CARD PAYMENT BAKERY 0007", "Bread", "treats", RowStatus::Skipped),
+            ("CARD PAYMENT CORNER SHOP 0043", "Snacks", "food.shop", RowStatus::Accepted),
+            ("TRANSFER FLAT 12", "", "", RowStatus::Pending),
+        ]);
+        let pending = imports(&ledger);
+
+        let change = perform(&mut ledger, |builder| {
+            builder.submit_import(id).unwrap();
+        });
+        assert_eq!(paths(&ledger), ["bills", "food.shop", "food.shop"]);
+        let texts: Vec<&str> = ledger.entries().iter().filter_map(|(_, e)| Some(e.statement.as_ref()?.text.as_str())).collect();
+        assert_eq!(texts, ["CARD PAYMENT CORNER SHOP 0042", "CARD PAYMENT CORNER SHOP 0043"]);
+        assert_eq!(ledger.imports().count(), 0);
+        assert!(ledger.categories().suggest("treats").is_empty(), "skipped rows create no categories");
+
+        ledger.apply(&mut MemoryStore, &change.inverse()).unwrap();
+        assert_eq!(paths(&ledger), ["bills"]);
+        assert!(ledger.categories().suggest("food").is_empty(), "categories created by the submit are removed");
+        assert_eq!(imports(&ledger), pending, "the import is back with its row statuses");
+    }
+
+    #[test]
+    fn deletes_account_with_imports_permanently() {
+        let mut ledger = Ledger::default();
+        let (cash, bank) = (ledger.add_test_account("Cash"), ledger.add_test_account("Bank"));
+        add_import(&mut ledger, cash, &[("TRANSFER FLAT 12", "Rent", "bills", RowStatus::Accepted)]);
+        let kept = add_import(&mut ledger, bank, &[("CARD PAYMENT BAKERY 0007", "", "", RowStatus::Pending)]);
+        let all = imports(&ledger);
+
+        let change = perform(&mut ledger, |builder| builder.delete_account_permanently(cash));
+        assert_eq!(ledger.imports().map(|(id, _)| id).collect::<Vec<_>>(), [kept]);
+
+        ledger.apply(&mut MemoryStore, &change.inverse()).unwrap();
+        assert_eq!(imports(&ledger), all);
     }
 }

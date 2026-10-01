@@ -6,6 +6,7 @@ use uuid::Uuid;
 use crate::account::{AccountId, Accounts};
 use crate::category::{CategoryId, CategoryPath};
 use crate::date_format::DateFormat;
+use crate::import::StatementLine;
 
 /// Identifies an entry. UUIDv7, so ordering by id is ordering by creation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -26,6 +27,8 @@ pub struct Entry {
     /// Amount in minor units of the account's currency (e.g. cents): positive for expenses,
     /// negative for income.
     pub amount: i64,
+    /// What the bank said about an imported entry, `None` for entries typed in.
+    pub statement: Option<StatementLine>,
 }
 
 /// Whether an entry is money spent or received.
@@ -349,6 +352,7 @@ mod tests {
                 name: parsed.name,
                 category: CategoryId::generate(),
                 amount: parsed.amount,
+                statement: None,
             };
             entry.kind()
         };
