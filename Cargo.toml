@@ -25,6 +25,10 @@ windows-sys = { version = "0.61", features = ["Win32_Globalization"] }
 [build-dependencies]
 slint-build = "1.18"
 
+[dev-dependencies]
+# Reads the sample data in examples/sample_db.
+csv = "1.4"
+
 [lib]
 # Distinct from the binary's name so their outputs (e.g. .pdb on Windows) don't collide.
 name = "monies_app"

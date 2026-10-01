@@ -1,4 +1,6 @@
 mod category;
+#[cfg(not(target_arch = "wasm32"))]
+mod database_writer;
 mod date_format;
 mod entry;
 mod ledger;
@@ -15,6 +17,10 @@ use date_format::DateFormat;
 use entry::{format_amount, Entry, ParsedEntry};
 use ledger::Ledger;
 use store::Store;
+
+#[cfg(not(target_arch = "wasm32"))]
+#[doc(hidden)]
+pub use database_writer::DatabaseWriter;
 
 slint::include_modules!();
 
