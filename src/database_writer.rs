@@ -43,11 +43,9 @@ impl DatabaseWriter {
     /// typed in the app, except that the date is ISO `YYYY-MM-DD`. Entries are kept in the
     /// order they're added. Nothing is written until [`Self::finish`].
     pub fn add_entry(&mut self, account: &str, date: &str, name: &str, category: &str, amount: &str) -> Result<(), Box<dyn Error>> {
-        let id = self.ledger.accounts().find(account).ok_or_else(|| format!("unknown account {account:?}"))?;
-        let decimals = self.ledger.accounts().get(id).expect("found account exists").currency.decimals();
-        let parsed = ParsedEntry::parse(&DateFormat::iso(), decimals, date, name, category, amount)?;
+        let parsed = ParsedEntry::parse(&DateFormat::iso(), self.ledger.accounts(), account, date, name, category, amount)?;
         let mut change = ChangeBuilder::new("Import", &self.ledger);
-        change.add_entry(parsed, id);
+        change.add_entry(parsed);
         let change = change.build();
         self.stage(change)
     }
@@ -62,5 +60,35 @@ impl DatabaseWriter {
         self.ledger.apply(&mut MemoryStore, &change)?;
         self.ops.extend(change.ops);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn writes_entries_of_accounts_in_different_currencies() {
+        let path = std::env::temp_dir().join(format!("monies-test-{}.db", uuid::Uuid::now_v7()));
+        let mut writer = DatabaseWriter::create(&path).unwrap();
+        writer.add_account("Silver bank", "PLN").unwrap();
+        writer.add_account("Gold bank", "eur").unwrap();
+        writer.add_account("Bronze bank", "USD").unwrap();
+        writer.add_entry("Silver bank", "2026-08-01", "Rent", "bills.rent", "2400").unwrap();
+        writer.add_entry("gold bank", "2026-08-10", "Museum", "holiday", "12.5").unwrap();
+        writer.add_entry("Bronze bank", "2026-08-20", "Subscription", "entertainment", "9.99").unwrap();
+        assert!(writer.add_entry("Copper bank", "2026-08-20", "Coins", "bills", "1").is_err());
+        writer.finish().unwrap();
+
+        let ledger = SqliteStore::open(&path).unwrap().load().unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let entries: Vec<(&str, i64)> = ledger
+            .entries()
+            .iter()
+            .map(|(_, entry)| (ledger.accounts().get(entry.account).unwrap().name.as_str(), entry.amount))
+            .collect();
+        assert_eq!(entries, [("Silver bank", 240000), ("Gold bank", 1250), ("Bronze bank", 999)]);
+        let currencies: Vec<&str> = ledger.accounts().iter().map(|(_, account)| account.currency.code()).collect();
+        assert_eq!(currencies, ["PLN", "EUR", "USD"]);
     }
 }

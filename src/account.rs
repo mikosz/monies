@@ -86,11 +86,43 @@ impl Accounts {
         self.active().next()
     }
 
+    /// The account that isn't deleted, if there's exactly one.
+    pub fn only_active(&self) -> Option<(AccountId, &Account)> {
+        let mut active = self.active();
+        match (active.next(), active.next()) {
+            (Some(only), None) => Some(only),
+            _ => None,
+        }
+    }
+
     /// The account with this name, ignoring case and surrounding whitespace; deleted ones
     /// included.
     pub fn find(&self, name: &str) -> Option<AccountId> {
         let name = name.trim().to_lowercase();
         self.iter().find(|(_, account)| account.name.to_lowercase() == name).map(|(id, _)| id)
+    }
+
+    /// The account with this name, ignoring case and surrounding whitespace, unless it's
+    /// deleted.
+    pub fn find_active(&self, name: &str) -> Option<(AccountId, &Account)> {
+        let id = self.find(name)?;
+        self.get(id).filter(|account| !account.deleted).map(|account| (id, account))
+    }
+
+    /// Names of the accounts that aren't deleted and whose name contains the typed text,
+    /// ignoring case and surrounding whitespace. Names starting with it come first, then
+    /// alphabetically.
+    pub fn suggest(&self, query: &str) -> Vec<&str> {
+        let query = query.trim().to_lowercase();
+        let mut matches: Vec<(bool, String, &str)> = self
+            .active()
+            .filter_map(|(_, account)| {
+                let name = account.name.to_lowercase();
+                name.contains(&query).then(|| (!name.starts_with(&query), name, account.name.as_str()))
+            })
+            .collect();
+        matches.sort();
+        matches.into_iter().map(|(.., name)| name).collect()
     }
 }
 
@@ -138,6 +170,40 @@ mod tests {
         assert_eq!(accounts.find("SILVER BANK"), Some(ids[0]));
         assert_eq!(accounts.find(" gold bank "), Some(ids[1]), "deleted accounts are found too");
         assert_eq!(accounts.find("Bronze bank"), None);
+    }
+
+    #[test]
+    fn finds_only_active_accounts_by_name() {
+        let (accounts, ids) = accounts_named(&[("Silver bank", false), ("Gold bank", true)]);
+        assert_eq!(accounts.find_active(" silver BANK ").map(|(id, _)| id), Some(ids[0]));
+        assert_eq!(accounts.find_active("Gold bank"), None, "deleted");
+        assert_eq!(accounts.find_active("Bronze bank"), None);
+    }
+
+    #[test]
+    fn only_active_requires_exactly_one() {
+        let (accounts, ids) = accounts_named(&[("Silver", true), ("Gold", false)]);
+        assert_eq!(accounts.only_active().map(|(id, _)| id), Some(ids[1]));
+        let (accounts, _) = accounts_named(&[("Silver", false), ("Gold", false)]);
+        assert_eq!(accounts.only_active(), None);
+        let (accounts, _) = accounts_named(&[("Silver", true)]);
+        assert_eq!(accounts.only_active(), None);
+    }
+
+    #[test]
+    fn suggests_active_accounts_prefix_matches_first() {
+        let (accounts, _) = accounts_named(&[
+            ("Silver bank", false),
+            ("bank of fiction", false),
+            ("Gold bank", false),
+            ("Bronze bank", true),
+            ("Cash", false),
+            ("Banknotes", false),
+        ]);
+        assert_eq!(accounts.suggest(""), ["bank of fiction", "Banknotes", "Cash", "Gold bank", "Silver bank"]);
+        assert_eq!(accounts.suggest(" BANK"), ["bank of fiction", "Banknotes", "Gold bank", "Silver bank"]);
+        assert_eq!(accounts.suggest("s"), ["Silver bank", "Banknotes", "Cash"]);
+        assert!(accounts.suggest("bronze").is_empty(), "deleted accounts aren't suggested");
     }
 
     #[test]

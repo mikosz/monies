@@ -1,101 +1,117 @@
-date,name,category,amount
-2026-04-01,Rent,bills.rent,2400.00
-2026-04-01,T-shirt,clothes,87.92
-2026-04-03,Cinema,entertainment.cinema,57.21
-2026-04-05,Netflix,entertainment.streaming,52.99
-2026-04-07,Coffee,food.coffee,18.73
-2026-04-09,Lidl,food.groceries,158.95
-2026-04-10,Salary,income.salary,-7800.00
-2026-04-12,Electricity,bills.utilities.electricity,197.55
-2026-04-15,Internet,bills.utilities.internet,69.99
-2026-04-15,Tram ticket,transport.public,4.40
-2026-04-17,Lidl,food.groceries,80.71
-2026-04-20,Phone plan,bills.phone,45.00
-2026-04-21,Lidl,food.groceries,158.30
-2026-04-23,Book,entertainment.books,61.57
-2026-04-24,Biedronka,food.groceries,79.35
-2026-04-27,Dog food,dogs.food,132.98
-2026-04-29,Dog food,dogs.food,141.40
-2026-04-29,Coffee,food.coffee,23.15
-2026-05-01,Rent,bills.rent,2400.00
-2026-05-05,Netflix,entertainment.streaming,52.99
-2026-05-10,Salary,income.salary,-7800.00
-2026-05-10,Bakery,food.groceries,11.66
-2026-05-11,Cinema,entertainment.cinema,57.93
-2026-05-12,Electricity,bills.utilities.electricity,142.25
-2026-05-15,Internet,bills.utilities.internet,69.99
-2026-05-20,Phone plan,bills.phone,45.00
-2026-05-21,Coffee,food.coffee,13.83
-2026-05-25,Pizza,food.restaurants,134.31
-2026-05-29,Orlen,transport.car.fuel,262.38
-2026-05-31,Biedronka,food.groceries,90.13
-2026-06-01,Rent,bills.rent,2400.00
-2026-06-04,Sushi,food.restaurants,216.24
-2026-06-05,Netflix,entertainment.streaming,52.99
-2026-06-07,Monthly pass,transport.public,110.00
-2026-06-10,Salary,income.salary,-7800.00
-2026-06-12,Electricity,bills.utilities.electricity,164.75
-2026-06-14,Dentist,health.dentist,350.00
-2026-06-15,Internet,bills.utilities.internet,69.99
-2026-06-16,Cinema,entertainment.cinema,63.67
-2026-06-18,Cinema,entertainment.cinema,39.58
-2026-06-20,Phone plan,bills.phone,45.00
-2026-06-03,Lidl,food.groceries,141.75
-2026-06-20,Biedronka,food.groceries,112.21
-2026-06-27,Dog food,dogs.food,135.62
-2026-06-28,Biedronka,food.groceries,148.67
-2026-07-01,Rent,bills.rent,2400.00
-2026-07-02,Orlen,transport.car.fuel,210.70
-2026-07-02,Car service,transport.car.service,980.00
-2026-07-03,Orlen,transport.car.fuel,202.77
-2026-07-05,Netflix,entertainment.streaming,52.99
-2026-07-06,Cleaning supplies,home.cleaning,28.55
-2026-07-07,Cinema,entertainment.cinema,41.12
-2026-07-07,Biedronka,food.groceries,147.26
-2026-07-10,Salary,income.salary,-7800.00
-2026-07-12,Electricity,bills.utilities.electricity,160.09
-2026-07-15,Internet,bills.utilities.internet,69.99
-2026-07-20,Phone plan,bills.phone,45.00
-2026-07-26,Pizza,food.restaurants,60.26
-2026-07-07,Biedronka,food.groceries,88.59
-2026-07-27,Flea pills,dogs.health.pills,76.09
-2026-07-31,Biedronka,food.groceries,210.43
-2026-08-01,Rent,bills.rent,2400.00
-2026-08-05,Netflix,entertainment.streaming,52.99
-2026-08-08,Dog food,dogs.food,247.77
-2026-08-09,Gift for mum,gifts,163.90
-2026-08-10,Salary,income.salary,-7800.00
-2026-08-11,Pizza,food.restaurants,96.12
-2026-08-12,Electricity,bills.utilities.electricity,206.28
-2026-08-03,Biedronka,food.groceries,186.88
-2026-08-15,Internet,bills.utilities.internet,69.99
-2026-08-15,Orlen,transport.car.fuel,282.08
-2026-08-15,Cleaning supplies,home.cleaning,59.46
-2026-08-16,Biedronka,food.groceries,175.16
-2026-08-14,Biedronka,food.groceries,197.04
-2026-08-20,Phone plan,bills.phone,45.00
-2026-08-21,Desk chair,home.furniture,649.00
-2026-08-24,Biedronka,food.groceries,197.75
-2026-08-24,Lidl,food.groceries,172.04
-2026-08-26,Cinema,entertainment.cinema,37.69
-2026-08-28,Coffee,food.coffee,17.14
-2026-08-29,Lidl,food.groceries,71.73
-2026-09-01,Rent,bills.rent,2400.00
-2026-09-05,Netflix,entertainment.streaming,52.99
-2026-08-17,Dog food,dogs.food,253.49
-2026-09-08,Lidl,food.groceries,122.78
-2026-09-10,Salary,income.salary,-7800.00
-2026-09-12,Electricity,bills.utilities.electricity,200.90
-2026-09-12,Cinema,entertainment.cinema,48.35
-2026-09-13,T-shirt,clothes,45.71
-2026-09-15,Internet,bills.utilities.internet,69.99
-2026-09-15,Lidl,food.groceries,104.88
-2026-09-17,Biedronka,food.groceries,81.02
-2026-09-19,Bakery,food.groceries,12.54
-2026-09-19,Lidl,food.groceries,127.48
-2026-09-20,Phone plan,bills.phone,45.00
-2026-09-22,Biedronka,food.groceries,115.99
-2026-09-24,Dog food,dogs.food,148.16
-2026-09-27,Tram ticket,transport.public,4.40
-2026-09-29,Biedronka,food.groceries,153.60
-2026-09-24,T-shirt,clothes,84.56
+account,date,name,category,amount
+Silver bank,2026-04-01,Rent,bills.rent,2400.00
+Silver bank,2026-04-01,T-shirt,clothes,87.92
+Silver bank,2026-04-03,Cinema,entertainment.cinema,57.21
+Silver bank,2026-04-05,Netflix,entertainment.streaming,52.99
+Silver bank,2026-04-07,Coffee,food.coffee,18.73
+Silver bank,2026-04-09,Lidl,food.groceries,158.95
+Silver bank,2026-04-10,Salary,income.salary,-7800.00
+Silver bank,2026-04-12,Electricity,bills.utilities.electricity,197.55
+Silver bank,2026-04-15,Internet,bills.utilities.internet,69.99
+Silver bank,2026-04-15,Tram ticket,transport.public,4.40
+Silver bank,2026-04-17,Lidl,food.groceries,80.71
+Bronze bank,2026-04-18,Online course,education,49.00
+Silver bank,2026-04-20,Phone plan,bills.phone,45.00
+Silver bank,2026-04-21,Lidl,food.groceries,158.30
+Silver bank,2026-04-23,Book,entertainment.books,61.57
+Silver bank,2026-04-24,Biedronka,food.groceries,79.35
+Silver bank,2026-04-27,Dog food,dogs.food,132.98
+Silver bank,2026-04-29,Dog food,dogs.food,141.40
+Silver bank,2026-04-29,Coffee,food.coffee,23.15
+Silver bank,2026-05-01,Rent,bills.rent,2400.00
+Silver bank,2026-05-05,Netflix,entertainment.streaming,52.99
+Silver bank,2026-05-10,Salary,income.salary,-7800.00
+Silver bank,2026-05-10,Bakery,food.groceries,11.66
+Silver bank,2026-05-11,Cinema,entertainment.cinema,57.93
+Silver bank,2026-05-12,Electricity,bills.utilities.electricity,142.25
+Silver bank,2026-05-15,Internet,bills.utilities.internet,69.99
+Silver bank,2026-05-20,Phone plan,bills.phone,45.00
+Silver bank,2026-05-21,Coffee,food.coffee,13.83
+Bronze bank,2026-05-22,Cloud storage,bills.subscriptions,2.99
+Silver bank,2026-05-25,Pizza,food.restaurants,134.31
+Silver bank,2026-05-29,Orlen,transport.car.fuel,262.38
+Silver bank,2026-05-31,Biedronka,food.groceries,90.13
+Silver bank,2026-06-01,Rent,bills.rent,2400.00
+Silver bank,2026-06-04,Sushi,food.restaurants,216.24
+Silver bank,2026-06-05,Netflix,entertainment.streaming,52.99
+Silver bank,2026-06-07,Monthly pass,transport.public,110.00
+Silver bank,2026-06-10,Salary,income.salary,-7800.00
+Silver bank,2026-06-12,Electricity,bills.utilities.electricity,164.75
+Silver bank,2026-06-14,Dentist,health.dentist,350.00
+Silver bank,2026-06-15,Internet,bills.utilities.internet,69.99
+Silver bank,2026-06-16,Cinema,entertainment.cinema,63.67
+Bronze bank,2026-06-17,Headphones,electronics,79.99
+Silver bank,2026-06-18,Cinema,entertainment.cinema,39.58
+Silver bank,2026-06-20,Phone plan,bills.phone,45.00
+Silver bank,2026-06-03,Lidl,food.groceries,141.75
+Silver bank,2026-06-20,Biedronka,food.groceries,112.21
+Silver bank,2026-06-27,Dog food,dogs.food,135.62
+Silver bank,2026-06-28,Biedronka,food.groceries,148.67
+Silver bank,2026-07-01,Rent,bills.rent,2400.00
+Silver bank,2026-07-02,Orlen,transport.car.fuel,210.70
+Silver bank,2026-07-02,Car service,transport.car.service,980.00
+Silver bank,2026-07-03,Orlen,transport.car.fuel,202.77
+Silver bank,2026-07-05,Netflix,entertainment.streaming,52.99
+Silver bank,2026-07-06,Cleaning supplies,home.cleaning,28.55
+Silver bank,2026-07-07,Cinema,entertainment.cinema,41.12
+Silver bank,2026-07-07,Biedronka,food.groceries,147.26
+Silver bank,2026-07-10,Salary,income.salary,-7800.00
+Silver bank,2026-07-12,Electricity,bills.utilities.electricity,160.09
+Silver bank,2026-07-15,Internet,bills.utilities.internet,69.99
+Silver bank,2026-07-20,Phone plan,bills.phone,45.00
+Bronze bank,2026-07-22,Cloud storage,bills.subscriptions,2.99
+Silver bank,2026-07-26,Pizza,food.restaurants,60.26
+Silver bank,2026-07-07,Biedronka,food.groceries,88.59
+Silver bank,2026-07-27,Flea pills,dogs.health.pills,76.09
+Silver bank,2026-07-31,Biedronka,food.groceries,210.43
+Silver bank,2026-08-01,Rent,bills.rent,2400.00
+Silver bank,2026-08-05,Netflix,entertainment.streaming,52.99
+Silver bank,2026-08-08,Dog food,dogs.food,247.77
+Silver bank,2026-08-09,Gift for mum,gifts,163.90
+Silver bank,2026-08-10,Salary,income.salary,-7800.00
+Silver bank,2026-08-11,Pizza,food.restaurants,96.12
+Silver bank,2026-08-12,Electricity,bills.utilities.electricity,206.28
+Silver bank,2026-08-03,Biedronka,food.groceries,186.88
+Silver bank,2026-08-15,Internet,bills.utilities.internet,69.99
+Silver bank,2026-08-15,Orlen,transport.car.fuel,282.08
+Silver bank,2026-08-15,Cleaning supplies,home.cleaning,59.46
+Silver bank,2026-08-16,Biedronka,food.groceries,175.16
+Silver bank,2026-08-14,Biedronka,food.groceries,197.04
+Gold bank,2026-08-17,Train ticket,transport.train,64.90
+Gold bank,2026-08-17,Hotel,travel.hotel,486.00
+Gold bank,2026-08-17,Restaurant,food.restaurants,38.50
+Gold bank,2026-08-18,Museum,entertainment.museum,16.00
+Gold bank,2026-08-18,Cash withdrawal,cash,100.00
+Gold bank,2026-08-19,Coffee,food.coffee,7.80
+Gold bank,2026-08-19,Restaurant,food.restaurants,52.40
+Gold bank,2026-08-20,Bike rental,transport.rental,25.00
+Gold bank,2026-08-21,Ice cream,food.snacks,6.50
+Gold bank,2026-08-22,Restaurant,food.restaurants,44.90
+Gold bank,2026-08-23,Train ticket,transport.train,64.90
+Silver bank,2026-08-20,Phone plan,bills.phone,45.00
+Silver bank,2026-08-21,Desk chair,home.furniture,649.00
+Silver bank,2026-08-24,Biedronka,food.groceries,197.75
+Silver bank,2026-08-24,Lidl,food.groceries,172.04
+Silver bank,2026-08-26,Cinema,entertainment.cinema,37.69
+Silver bank,2026-08-28,Coffee,food.coffee,17.14
+Silver bank,2026-08-29,Lidl,food.groceries,71.73
+Silver bank,2026-09-01,Rent,bills.rent,2400.00
+Silver bank,2026-09-05,Netflix,entertainment.streaming,52.99
+Silver bank,2026-08-17,Dog food,dogs.food,253.49
+Silver bank,2026-09-08,Lidl,food.groceries,122.78
+Silver bank,2026-09-10,Salary,income.salary,-7800.00
+Silver bank,2026-09-12,Electricity,bills.utilities.electricity,200.90
+Silver bank,2026-09-12,Cinema,entertainment.cinema,48.35
+Silver bank,2026-09-13,T-shirt,clothes,45.71
+Silver bank,2026-09-15,Internet,bills.utilities.internet,69.99
+Silver bank,2026-09-15,Lidl,food.groceries,104.88
+Silver bank,2026-09-17,Biedronka,food.groceries,81.02
+Bronze bank,2026-09-18,E-book,entertainment.books,12.99
+Silver bank,2026-09-19,Bakery,food.groceries,12.54
+Silver bank,2026-09-19,Lidl,food.groceries,127.48
+Silver bank,2026-09-20,Phone plan,bills.phone,45.00
+Silver bank,2026-09-22,Biedronka,food.groceries,115.99
+Silver bank,2026-09-24,Dog food,dogs.food,148.16
+Silver bank,2026-09-27,Tram ticket,transport.public,4.40
+Silver bank,2026-09-29,Biedronka,food.groceries,153.60
+Silver bank,2026-09-24,T-shirt,clothes,84.56

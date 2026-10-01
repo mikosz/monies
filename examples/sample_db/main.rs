@@ -7,9 +7,9 @@
 //! ```
 //!
 //! Each row of `accounts.csv` is an account, in the order they were created: a name and a
-//! currency code. Each row of `entries.csv` is one entry, in the order they were entered: an
-//! ISO date, a name, a category path and an amount (expenses positive, income negative). For
-//! now, all entries go to the first account. `--force` replaces an existing database.
+//! currency code. Each row of `entries.csv` is one entry, in the order they were entered: the
+//! account's name, an ISO date, a name, a category path and an amount in the account's
+//! currency (expenses positive, income negative). `--force` replaces an existing database.
 
 use std::error::Error;
 use std::path::Path;
@@ -45,16 +45,12 @@ fn main() -> Result<(), Box<dyn Error>> {
 fn fill(database: &Path, accounts_csv: &Path, entries_csv: &Path) -> Result<(usize, usize), Box<dyn Error>> {
     let mut writer = DatabaseWriter::create(database)?;
 
-    let mut accounts = Vec::new();
-    read(accounts_csv, |[name, currency]| {
-        accounts.push(name.to_owned());
-        writer.add_account(name, currency)
+    let accounts = read(accounts_csv, |[name, currency]| writer.add_account(name, currency))?;
+    let entries = read(entries_csv, |[account, date, name, category, amount]| {
+        writer.add_entry(account, date, name, category, amount)
     })?;
-    // Until entries.csv names accounts, everything goes to the first one.
-    let first = accounts.first().ok_or_else(|| format!("{} has no accounts", accounts_csv.display()))?;
-    let entries = read(entries_csv, |[date, name, category, amount]| writer.add_entry(first, date, name, category, amount))?;
     writer.finish()?;
-    Ok((accounts.len(), entries))
+    Ok((accounts, entries))
 }
 
 /// Calls `add` with the `N` fields of every row of the CSV file; returns the number of rows.

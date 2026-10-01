@@ -2,7 +2,7 @@ import { Palette } from "std-widgets.slint";
 
 export enum EntryKind { expense, income, neutral }
 
-export enum EntryColumn { date, name, category, amount }
+export enum EntryColumn { account, date, name, category, amount }
 
 // What a row of the list of entries is.
 export enum RowType {
@@ -19,10 +19,15 @@ export struct EntryRow {
     title: string,
     // The entry's id, to refer back to it (e.g. when saving an edit).
     id: string,
+    // The account's name.
+    account: string,
     date: string,
     name: string,
     category: string,
+    // The number as typed, e.g. "12.50", to edit.
     amount: string,
+    // With the currency's symbol, e.g. "€12.50", to show.
+    amount-display: string,
     kind: EntryKind,
 }
 
@@ -30,7 +35,10 @@ export struct EntryRow {
 // Column sizes come from the page so lines align with the header and the input row.
 export component EntryLine inherits Rectangle {
     in property <EntryRow> entry;
+    // Whether the account column is shown; it's left out when there's only one account.
+    in property <bool> show-account;
     in property <length> column-spacing;
+    in property <length> account-width;
     in property <length> date-width;
     in property <length> amount-width;
     // Minimum width of the name and category columns, which share the remaining space.
@@ -66,7 +74,12 @@ export component EntryLine inherits Rectangle {
         padding-bottom: 6px;
         spacing: root.column-spacing;
 
-        Text {
+        if root.show-account : Text {
+            width: root.account-width;
+            text: root.entry.account;
+            overflow: elide;
+        }
+        date := Text {
             width: root.date-width;
             text: root.entry.date;
         }
@@ -86,7 +99,7 @@ export component EntryLine inherits Rectangle {
         }
         amount := Text {
             width: root.amount-width;
-            text: root.entry.amount;
+            text: root.entry.amount-display;
             horizontal-alignment: right;
         }
     }
@@ -98,7 +111,8 @@ export component EntryLine inherits Rectangle {
             // Columns start where their text starts; the spacing before one counts to the
             // previous column.
             root.double-clicked(
-                self.mouse-x < name.x ? EntryColumn.date
+                root.show-account && self.mouse-x < date.x ? EntryColumn.account
+                : self.mouse-x < name.x ? EntryColumn.date
                 : self.mouse-x < category.x ? EntryColumn.name
                 : self.mouse-x < amount.x ? EntryColumn.category
                 : EntryColumn.amount);

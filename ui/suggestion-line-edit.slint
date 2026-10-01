@@ -68,6 +68,9 @@ export component SuggestionLineEdit {
 
     VerticalLayout {
         input := LineEdit {
+            // The owner sizes the widget, e.g. to a narrow column; the style's LineEdit would
+            // otherwise insist on its minimum width (160px in Fluent) and overflow it.
+            min-width: 1px;
             changed has-focus => {
                 if (self.has-focus) {
                     root.edited(self.text);

@@ -105,17 +105,16 @@ impl Ledger {
 mod tests {
     use super::*;
     use crate::change::ChangeBuilder;
-    use crate::date_format::DateFormat;
     use crate::entry::ParsedEntry;
     use crate::store::MemoryStore;
 
-    fn parsed(category: &str, amount: &str) -> ParsedEntry {
-        ParsedEntry::parse(&DateFormat::iso(), 2, "2026-09-30", "Rent", category, amount).unwrap()
+    fn parsed(account: AccountId, category: &str, amount: &str) -> ParsedEntry {
+        ParsedEntry::test(account, "2026-09-30", "Rent", category, amount)
     }
 
     fn add(ledger: &mut Ledger, account: AccountId, category: &str) -> (Change, EntryId) {
         let mut builder = ChangeBuilder::new("Add", ledger);
-        let id = builder.add_entry(parsed(category, "1"), account);
+        let id = builder.add_entry(parsed(account, category, "1"));
         let change = builder.build();
         ledger.apply(&mut MemoryStore, &change).unwrap();
         (change, id)
@@ -180,7 +179,7 @@ mod tests {
         let (id, current) = ledger.entries()[0].clone();
 
         let mut builder = ChangeBuilder::new("Edit", &ledger);
-        builder.update_entry(id, &current, parsed("bills.water", "-5"));
+        builder.update_entry(id, &current, parsed(account, "bills.water", "-5"));
         let change = builder.build();
         ledger.apply(&mut MemoryStore, &change).unwrap();
 
@@ -190,6 +189,22 @@ mod tests {
         ledger.apply(&mut MemoryStore, &change.inverse()).unwrap();
         assert_eq!(ledger.entry(id), Some(&current));
         assert!(ledger.categories().suggest("bills.").iter().all(|path| path != "bills.water"));
+    }
+
+    #[test]
+    fn moves_entry_to_another_account_and_back() {
+        let mut ledger = Ledger::default();
+        let (cash, bank) = (ledger.add_test_account("Cash"), ledger.add_test_account("Bank"));
+        add(&mut ledger, cash, "food");
+        let (id, current) = ledger.entries()[0].clone();
+
+        let change = perform(&mut ledger, |builder| builder.update_entry(id, &current, parsed(bank, "food", "1")));
+        assert_eq!((ledger.entry_count(cash), ledger.entry_count(bank)), (0, 1));
+        assert_eq!(ledger.entry(id).unwrap().account, bank);
+
+        ledger.apply(&mut MemoryStore, &change.inverse()).unwrap();
+        assert_eq!(ledger.entry(id), Some(&current));
+        assert_eq!((ledger.entry_count(cash), ledger.entry_count(bank)), (1, 0));
     }
 
     #[test]

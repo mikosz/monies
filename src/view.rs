@@ -1,8 +1,9 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use slint::{ComponentHandle, Model, SharedString, VecModel};
 
+use crate::account::AccountId;
 use crate::currency::Currency;
 use crate::date_format::DateFormat;
 use crate::entry::{self, Entry, EntryId, format_amount};
@@ -21,6 +22,13 @@ pub struct View {
     category_suggestions: Rc<VecModel<SharedString>>,
     /// The text last reported by a category input (on focus or edit), i.e. of the one in use.
     category_query: RefCell<String>,
+    /// Suggestions for `account_query`.
+    account_suggestions: Rc<VecModel<SharedString>>,
+    /// The text last reported by an account input, like `category_query`.
+    account_query: RefCell<String>,
+    /// The account of the entry added last since the app started; adding continues with it.
+    /// Not saved: the next session starts by asking for the account.
+    session_account: Cell<Option<AccountId>>,
     /// All accounts followed by the row for adding a new account.
     accounts: Rc<VecModel<AccountRow>>,
     new_account_id: SharedString,
@@ -38,6 +46,9 @@ impl View {
             new_entry_id: store.get_new_entry_id(),
             category_suggestions: Rc::new(VecModel::default()),
             category_query: RefCell::default(),
+            account_suggestions: Rc::new(VecModel::default()),
+            account_query: RefCell::default(),
+            session_account: Cell::default(),
             accounts: Rc::new(VecModel::default()),
             new_account_id: settings.get_new_account_id(),
             currency_suggestions: Rc::new(VecModel::default()),
@@ -45,6 +56,7 @@ impl View {
         store.set_date_placeholder(view.date_format.placeholder().into());
         store.set_entries(view.rows.clone().into());
         store.set_category_suggestions(view.category_suggestions.clone().into());
+        store.set_account_suggestions(view.account_suggestions.clone().into());
         settings.set_accounts(view.accounts.clone().into());
         settings.set_currency_suggestions(view.currency_suggestions.clone().into());
         view
@@ -73,13 +85,29 @@ impl View {
 
         self.show_last_date(ledger);
         self.suggest_categories(ledger);
+        self.suggest_accounts(ledger);
+        self.show_session_account(ledger);
         self.show_accounts(ledger);
+    }
+
+    /// Called after an entry was added to `account` (and shown): the inputs are cleared, and
+    /// the next entry goes to the same account.
+    pub fn entry_added(&self, ledger: &Ledger, account: AccountId) {
+        self.query_categories(ledger, "");
+        self.session_account.set(Some(account));
+        self.show_session_account(ledger);
     }
 
     /// Updates the category suggestions for the text of a category input.
     pub fn query_categories(&self, ledger: &Ledger, text: &str) {
         self.category_query.replace(text.to_owned());
         self.suggest_categories(ledger);
+    }
+
+    /// Updates the account suggestions for the text of an account input.
+    pub fn query_accounts(&self, ledger: &Ledger, text: &str) {
+        self.account_query.replace(text.to_owned());
+        self.suggest_accounts(ledger);
     }
 
     /// Updates the currency suggestions for the text of a currency input.
@@ -93,10 +121,12 @@ impl View {
         EntryRow {
             row_type: RowType::Entry,
             id: id.0.to_string().into(),
+            account: account.name.as_str().into(),
             date: self.date_format.format(entry.date).into(),
             name: entry.name.as_str().into(),
             category: ledger.categories().path(entry.category).into(),
             amount: format_amount(entry.amount, account.currency.decimals()).into(),
+            amount_display: account.currency.format_amount(entry.amount).into(),
             kind: match entry.kind() {
                 entry::EntryKind::Expense => EntryKind::Expense,
                 entry::EntryKind::Income => EntryKind::Income,
@@ -125,6 +155,22 @@ impl View {
         self.category_suggestions.set_vec(suggestions.collect::<Vec<_>>());
     }
 
+    fn suggest_accounts(&self, ledger: &Ledger) {
+        let suggestions = ledger.accounts().suggest(&self.account_query.borrow());
+        let suggestions = suggestions.into_iter().map(SharedString::from);
+        self.account_suggestions.set_vec(suggestions.collect::<Vec<_>>());
+    }
+
+    /// Shows the current name of the session's account, which may have been renamed since,
+    /// or "" when there's none or it's been deleted.
+    fn show_session_account(&self, ledger: &Ledger) {
+        let account = self.session_account.get().and_then(|id| ledger.accounts().get(id));
+        let name = account.filter(|account| !account.deleted).map_or("", |account| account.name.as_str());
+        if let Some(window) = self.window.upgrade() {
+            window.global::<EntriesStore>().set_session_account(name.into());
+        }
+    }
+
     fn show_accounts(&self, ledger: &Ledger) {
         let new_account = AccountRow { id: self.new_account_id.clone(), ..Default::default() };
         let rows: Vec<AccountRow> = ledger
@@ -145,6 +191,9 @@ impl View {
             let settings = window.global::<SettingsStore>();
             settings.set_has_accounts(ledger.accounts().first_active().is_some());
             settings.set_has_deleted_accounts(ledger.accounts().iter().any(|(_, account)| account.deleted));
+            // With a single account, it's implied: entries don't show it.
+            let several = ledger.accounts().active().nth(1).is_some();
+            window.global::<EntriesStore>().set_several_accounts(several);
         }
     }
 }

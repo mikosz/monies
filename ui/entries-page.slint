@@ -10,21 +10,24 @@ export { EntriesStore, EntryKind, EntryRow, RowType }
 // The list of entries by date, divided into months. Pressing A adds entries in a line at the
 // end of the list until Escape; double-clicking a line edits it in place. Both are modal:
 // everything else is dimmed and disabled meanwhile. Without an account, entries can't be added.
+// The account column is only shown when there are several accounts.
 export component EntriesPage inherits Page {
     title: "Entries";
     description: "";
 
     // Header and lines share these constraints so the columns line up.
     property <length> column-spacing: 8px;
+    property <length> account-width: 130px;
     property <length> date-width: 110px;
-    property <length> amount-width: 110px;
+    // Fits currency symbols too, e.g. "-12345.67 CHF".
+    property <length> amount-width: 140px;
     property <length> flexible-width: 100px;
     // Padding inside an entry line; the header uses the same so its titles align.
     property <length> line-padding: 8px;
 
     property <bool> editing: EntriesStore.editing-id != "";
     property <bool> adding: EntriesStore.editing-id == EntriesStore.new-entry-id;
-    // Column to focus when an editor opens.
+    // Column to focus when an editor of an existing entry opens.
     property <EntryColumn> edit-column;
 
     // Without input fields, keys (A, and the window's undo shortcuts) need something focused.
@@ -41,7 +44,8 @@ export component EntriesPage inherits Page {
     }
 
     function start-adding() {
-        root.start-edit(EntriesStore.new-entry-id, EntryColumn.date);
+        // The editor decides which field to focus, see `EntryEditor.reset`.
+        EntriesStore.editing-id = EntriesStore.new-entry-id;
         root.scroll-to-bottom();
     }
 
@@ -74,6 +78,11 @@ export component EntriesPage inherits Page {
                     padding-right: root.line-padding;
                     spacing: root.column-spacing;
 
+                    if EntriesStore.several-accounts : Text {
+                        width: root.account-width;
+                        text: "Account";
+                        font-weight: 700;
+                    }
                     Text {
                         width: root.date-width;
                         text: "Date";
@@ -139,7 +148,9 @@ export component EntriesPage inherits Page {
                     if row.row-type == RowType.entry && row.id != EntriesStore.editing-id : EntryLine {
                         entry: row;
                         dimmed: root.editing;
+                        show-account: EntriesStore.several-accounts;
                         column-spacing: root.column-spacing;
+                        account-width: root.account-width;
                         date-width: root.date-width;
                         amount-width: root.amount-width;
                         flexible-width: root.flexible-width;
@@ -157,25 +168,32 @@ export component EntriesPage inherits Page {
                             padding: 2px;
 
                             EntryEditor {
+                                show-account: EntriesStore.several-accounts;
                                 column-spacing: root.column-spacing;
+                                account-width: root.account-width;
                                 date-width: root.date-width;
                                 amount-width: root.amount-width;
                                 flexible-width: root.flexible-width;
                                 init => {
-                                    self.date = row.date;
-                                    self.name = row.name;
-                                    self.category = row.category;
-                                    self.amount = row.amount;
-                                    self.focus-column(root.edit-column);
+                                    if (is-new) {
+                                        self.reset();
+                                    } else {
+                                        self.account = row.account;
+                                        self.date = row.date;
+                                        self.name = row.name;
+                                        self.category = row.category;
+                                        self.amount = row.amount;
+                                        self.focus-column(root.edit-column);
+                                    }
                                 }
                                 submitted => {
                                     if (is-new) {
                                         // Stay in adding mode for the next entry.
-                                        if (EntriesStore.add-entry(self.date, self.name, self.category, self.amount)) {
+                                        if (EntriesStore.add-entry(self.account, self.date, self.name, self.category, self.amount)) {
                                             self.reset();
                                             root.scroll-to-bottom();
                                         }
-                                    } else if (EntriesStore.update-entry(row.id, self.date, self.name, self.category, self.amount)) {
+                                    } else if (EntriesStore.update-entry(row.id, self.account, self.date, self.name, self.category, self.amount)) {
                                         root.finish-edit();
                                     }
                                 }

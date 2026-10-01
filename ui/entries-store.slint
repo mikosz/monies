@@ -3,18 +3,31 @@ import { EntryRow } from "entry-line.slint";
 // Entries and the operations on them, implemented in Rust.
 export global EntriesStore {
     in property <[EntryRow]> entries;
-    // Arguments: date, name, category, amount.
+    // Arguments: account, date, name, category, amount. The account may be "" when there's
+    // only one (see `several-accounts`).
     // Returns true when the input was valid and the entry has been added.
-    callback add-entry(string, string, string, string) -> bool;
-    // Arguments: id, date, name, category, amount.
+    callback add-entry(string, string, string, string, string) -> bool;
+    // Arguments: id, account, date, name, category, amount, like `add-entry`. Another account
+    // moves the entry there.
     // Returns true when the input was valid and the entry has been saved (or was unchanged).
-    callback update-entry(string, string, string, string, string) -> bool;
+    callback update-entry(string, string, string, string, string, string) -> bool;
 
     // Id of the entry being edited in place, or "" when none is. While editing, everything
     // else is disabled. Adding is editing the row with `new-entry-id`.
     in-out property <string> editing-id;
     // Id of the extra last row of `entries`, used for adding entries.
     out property <string> new-entry-id: "new";
+
+    // Whether there's more than one account that isn't deleted. Otherwise entries go to the
+    // only one, so the account isn't shown or asked for.
+    in property <bool> several-accounts;
+    // Name of the account the last entry was added to since the app started, which adding
+    // continues with; "" before the first add or when that account has been deleted.
+    in property <string> session-account;
+    // Suggestions for the text last reported through `account-edited`.
+    in property <[string]> account-suggestions;
+    // Called with the text of an account input when it gains focus or changes.
+    callback account-edited(string);
 
     // Date of the most recently added entry (not the newest date); today before any entry.
     in property <string> last-date;

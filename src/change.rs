@@ -127,21 +127,24 @@ impl<'a> ChangeBuilder<'a> {
         self.ops.push(Op::DeleteAccount { id, account });
     }
 
-    /// Adds an entry to the account, whose currency `parsed.amount` is in.
-    pub fn add_entry(&mut self, parsed: ParsedEntry, account: AccountId) -> EntryId {
+    /// Adds an entry to `parsed.account`.
+    pub fn add_entry(&mut self, parsed: ParsedEntry) -> EntryId {
         let category = self.category(&parsed.category);
         let id = EntryId::generate();
-        let entry = Entry { account, date: parsed.date, name: parsed.name, category, amount: parsed.amount };
+        let entry =
+            Entry { account: parsed.account, date: parsed.date, name: parsed.name, category, amount: parsed.amount };
         self.ops.push(Op::InsertEntry { id, entry });
         id
     }
 
     /// Replaces the entry `id`, currently `current`, with the parsed input. Records nothing
-    /// when the input doesn't change the entry. The entry stays in its account.
+    /// when the input doesn't change the entry. A different account moves the entry there;
+    /// the amount is then taken as it is, in the other account's currency.
     pub fn update_entry(&mut self, id: EntryId, current: &Entry, parsed: ParsedEntry) {
         // An unchanged entry keeps its existing category, so no categories are created then.
         let category = self.category(&parsed.category);
-        let after = Entry { account: current.account, date: parsed.date, name: parsed.name, category, amount: parsed.amount };
+        let after =
+            Entry { account: parsed.account, date: parsed.date, name: parsed.name, category, amount: parsed.amount };
         if after != *current {
             self.ops.push(Op::UpdateEntry { id, before: current.clone(), after });
         }
@@ -191,11 +194,10 @@ impl<'a> ChangeBuilder<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::date_format::DateFormat;
     use crate::store::MemoryStore;
 
-    fn parsed(category: &str) -> ParsedEntry {
-        ParsedEntry::parse(&DateFormat::iso(), 2, "2026-09-30", "Rent", category, "1").unwrap()
+    fn parsed(account: AccountId, category: &str) -> ParsedEntry {
+        ParsedEntry::test(account, "2026-09-30", "Rent", category, "1")
     }
 
     fn ledger_with(categories: Categories) -> Ledger {
@@ -222,7 +224,7 @@ mod tests {
         let account = AccountId::generate();
         let ledger = Ledger::default();
         let mut builder = ChangeBuilder::new("Add", &ledger);
-        builder.add_entry(parsed("bills.rent"), account);
+        builder.add_entry(parsed(account, "bills.rent"));
         let change = builder.build();
 
         assert_eq!(inserted_categories(&change), ["bills", "rent"]);
@@ -245,9 +247,9 @@ mod tests {
         let account = AccountId::generate();
 
         let mut builder = ChangeBuilder::new("Import", &ledger);
-        builder.add_entry(parsed("bills.rent"), account);
-        builder.add_entry(parsed("BILLS.Rent"), account);
-        builder.add_entry(parsed("bills"), account);
+        builder.add_entry(parsed(account, "bills.rent"));
+        builder.add_entry(parsed(account, "BILLS.Rent"));
+        builder.add_entry(parsed(account, "bills"));
         let change = builder.build();
 
         assert_eq!(inserted_categories(&change), ["rent"]);
@@ -269,7 +271,7 @@ mod tests {
     fn entry_ids_follow_creation_order() {
         let (ledger, account) = (Ledger::default(), AccountId::generate());
         let mut builder = ChangeBuilder::new("Import", &ledger);
-        let ids: Vec<EntryId> = (0..100).map(|_| builder.add_entry(parsed("bills"), account)).collect();
+        let ids: Vec<EntryId> = (0..100).map(|_| builder.add_entry(parsed(account, "bills"))).collect();
         assert!(ids.is_sorted());
     }
 
@@ -277,7 +279,7 @@ mod tests {
     fn inverse_reverses_and_inverts_operations() {
         let ledger = Ledger::default();
         let mut builder = ChangeBuilder::new("Add", &ledger);
-        builder.add_entry(parsed("bills.rent"), AccountId::generate());
+        builder.add_entry(parsed(AccountId::generate(), "bills.rent"));
         let change = builder.build();
         let inverse = change.inverse();
 
@@ -290,7 +292,8 @@ mod tests {
 
     fn entry(categories: &Categories, category: &str, amount: i64) -> Entry {
         let category = categories.find(&CategoryPath::parse(category).unwrap()).unwrap();
-        Entry { account: AccountId::generate(), date: parsed("x").date, name: "Rent".to_owned(), category, amount }
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 9, 30).unwrap();
+        Entry { account: AccountId::generate(), date, name: "Rent".to_owned(), category, amount }
     }
 
     #[test]
@@ -302,7 +305,7 @@ mod tests {
 
         let id = EntryId::generate();
         let mut builder = ChangeBuilder::new("Edit", &ledger);
-        builder.update_entry(id, &current, parsed("bills.rent"));
+        builder.update_entry(id, &current, parsed(current.account, "bills.rent"));
         let change = builder.build();
 
         assert_eq!(inserted_categories(&change), ["rent"]);
@@ -316,6 +319,22 @@ mod tests {
     }
 
     #[test]
+    fn update_moves_entry_to_another_account() {
+        let mut categories = Categories::default();
+        categories.insert(CategoryId::generate(), "bills".to_owned(), None);
+        let current = entry(&categories, "bills", 100);
+        let ledger = ledger_with(categories);
+
+        let (id, other) = (EntryId::generate(), AccountId::generate());
+        let mut builder = ChangeBuilder::new("Edit", &ledger);
+        builder.update_entry(id, &current, parsed(other, "bills"));
+        let change = builder.build();
+
+        let after = Entry { account: other, ..current.clone() };
+        assert_eq!(change.ops, [Op::UpdateEntry { id, before: current, after }]);
+    }
+
+    #[test]
     fn unchanged_update_records_nothing() {
         let mut categories = Categories::default();
         categories.insert(CategoryId::generate(), "Bills".to_owned(), None);
@@ -323,7 +342,7 @@ mod tests {
         let ledger = ledger_with(categories);
 
         let mut builder = ChangeBuilder::new("Edit", &ledger);
-        builder.update_entry(EntryId::generate(), &current, parsed("BILLS"));
+        builder.update_entry(EntryId::generate(), &current, parsed(current.account, "BILLS"));
         assert!(builder.build().is_empty());
     }
 
@@ -343,7 +362,7 @@ mod tests {
         let mut ledger = Ledger::default();
         let (cash, bank) = (ledger.add_test_account("Cash"), ledger.add_test_account("Bank"));
         let mut builder = ChangeBuilder::new("Add", &ledger);
-        builder.add_entry(parsed("bills"), cash);
+        builder.add_entry(parsed(cash, "bills"));
         let change = builder.build();
         ledger.apply(&mut MemoryStore, &change).unwrap();
         (ledger, cash, bank)
@@ -431,7 +450,7 @@ mod tests {
     fn deleting_account_permanently_deletes_its_entries_first() {
         let (mut ledger, cash, bank) = ledger_with_accounts();
         let mut builder = ChangeBuilder::new("Add", &ledger);
-        builder.add_entry(parsed("food"), bank);
+        builder.add_entry(parsed(bank, "food"));
         let change = builder.build();
         ledger.apply(&mut MemoryStore, &change).unwrap();
 

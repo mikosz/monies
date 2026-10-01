@@ -80,66 +80,46 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     let entries_store = main_window.global::<EntriesStore>();
     entries_store.on_add_entry({
         let (document, view) = (document.clone(), view.clone());
-        move |date, name, category, amount| {
+        move |account, date, name, category, amount| {
             let mut document = document.borrow_mut();
-            // Temporarily, until entries get an account field (step 1b): new entries go to the
-            // first active account.
-            let Some((account, decimals)) =
-                document.ledger().accounts().first_active().map(|(id, account)| (id, account.currency.decimals()))
+            let accounts = document.ledger().accounts();
+            let Ok(parsed) = ParsedEntry::parse(view.date_format(), accounts, &account, &date, &name, &category, &amount)
             else {
                 return false;
             };
-            let Ok(parsed) = ParsedEntry::parse(view.date_format(), decimals, &date, &name, &category, &amount) else {
-                return false;
-            };
+            let account = parsed.account;
             let mut change = ChangeBuilder::new(format!("Add entry ‘{}’", parsed.name), document.ledger());
-            change.add_entry(parsed, account);
+            change.add_entry(parsed);
             let change = change.build();
-            match document.perform(change) {
-                Ok(()) => {
-                    view.show(document.ledger());
-                    // The inputs are cleared after a successful add.
-                    view.query_categories(document.ledger(), "");
-                    true
-                }
-                Err(error) => {
-                    // TODO: show storage errors in the UI.
-                    eprintln!("Failed to save entry: {error}");
-                    false
-                }
+            if !perform(&mut document, &view, change) {
+                return false;
             }
+            view.entry_added(document.ledger(), account);
+            true
         }
     });
 
     entries_store.on_update_entry({
         let (document, view) = (document.clone(), view.clone());
-        move |id, date, name, category, amount| {
+        move |id, account, date, name, category, amount| {
             let Ok(id) = Uuid::parse_str(&id).map(EntryId) else { return false };
             let mut document = document.borrow_mut();
             let Some(current) = document.ledger().entry(id).cloned() else { return false };
-            let Some(account) = document.ledger().accounts().get(current.account) else { return false };
-            let decimals = account.currency.decimals();
-            let Ok(parsed) = ParsedEntry::parse(view.date_format(), decimals, &date, &name, &category, &amount) else {
+            let accounts = document.ledger().accounts();
+            let Ok(parsed) = ParsedEntry::parse(view.date_format(), accounts, &account, &date, &name, &category, &amount)
+            else {
                 return false;
             };
             let mut change = ChangeBuilder::new(format!("Edit entry ‘{}’", current.name), document.ledger());
             change.update_entry(id, &current, parsed);
             let change = change.build();
-            if change.is_empty() {
-                return true;
-            }
-            match document.perform(change) {
-                Ok(()) => {
-                    view.show(document.ledger());
-                    true
-                }
-                Err(error) => {
-                    // TODO: show storage errors in the UI.
-                    eprintln!("Failed to save entry: {error}");
-                    false
-                }
-            }
+            perform(&mut document, &view, change)
         }
+    });
+
+    entries_store.on_account_edited({
+        let (document, view) = (document.clone(), view.clone());
+        move |text| view.query_accounts(document.borrow().ledger(), &text)
     });
 
     entries_store.on_category_edited({

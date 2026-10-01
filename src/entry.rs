@@ -3,7 +3,7 @@ use std::fmt;
 use chrono::NaiveDate;
 use uuid::Uuid;
 
-use crate::account::AccountId;
+use crate::account::{AccountId, Accounts};
 use crate::category::{CategoryId, CategoryPath};
 use crate::date_format::DateFormat;
 
@@ -50,15 +50,19 @@ impl Entry {
 /// Validated user input for an entry whose category path hasn't been resolved yet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedEntry {
+    pub account: AccountId,
     pub date: NaiveDate,
     pub name: String,
     pub category: CategoryPath,
-    /// Amount in minor units (e.g. cents). Negative values are allowed.
+    /// Amount in minor units of the account's currency (e.g. cents). Negative values are
+    /// allowed.
     pub amount: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntryError {
+    /// No account that isn't deleted has the name.
+    UnknownAccount,
     InvalidDate,
     EmptyName,
     EmptyCategory,
@@ -68,6 +72,7 @@ pub enum EntryError {
 impl fmt::Display for EntryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            EntryError::UnknownAccount => write!(f, "there's no account with this name"),
             EntryError::InvalidDate => write!(f, "date is not in the expected format"),
             EntryError::EmptyName => write!(f, "name must not be empty"),
             EntryError::EmptyCategory => write!(f, "category must not be empty"),
@@ -81,16 +86,26 @@ impl fmt::Display for EntryError {
 impl std::error::Error for EntryError {}
 
 impl ParsedEntry {
-    /// Validates raw user input; `decimals` is the number of decimal places of the amount's
-    /// currency. Surrounding whitespace is ignored.
+    /// Validates raw user input. Surrounding whitespace is ignored.
+    ///
+    /// The account is one of `accounts` that isn't deleted, named ignoring case. With only
+    /// one such account, its name may be left empty. The amount is in that account's currency.
     pub fn parse(
         date_format: &DateFormat,
-        decimals: u32,
+        accounts: &Accounts,
+        account: &str,
         date: &str,
         name: &str,
         category: &str,
         amount: &str,
     ) -> Result<Self, EntryError> {
+        let (account, currency) = match account.trim() {
+            "" => accounts.only_active(),
+            name => accounts.find_active(name),
+        }
+        .map(|(id, account)| (id, account.currency))
+        .ok_or(EntryError::UnknownAccount)?;
+
         let date = date_format.parse(date).ok_or(EntryError::InvalidDate)?;
 
         let name = name.trim();
@@ -99,14 +114,31 @@ impl ParsedEntry {
         }
 
         let category = CategoryPath::parse(category).ok_or(EntryError::EmptyCategory)?;
-        let amount = parse_amount(amount, decimals)?;
+        let amount = parse_amount(amount, currency.decimals())?;
 
         Ok(Self {
+            account,
             date,
             name: name.to_owned(),
             category,
             amount,
         })
+    }
+}
+
+#[cfg(test)]
+impl ParsedEntry {
+    /// Input for an entry of `account` as if it had been parsed, for tests that don't need
+    /// the account to exist: the date is ISO `YYYY-MM-DD` and the amount has two decimal
+    /// places. Panics on invalid input.
+    pub fn test(account: AccountId, date: &str, name: &str, category: &str, amount: &str) -> Self {
+        Self {
+            account,
+            date: DateFormat::iso().parse(date).expect("valid date"),
+            name: name.to_owned(),
+            category: CategoryPath::parse(category).expect("valid category"),
+            amount: parse_amount(amount, 2).expect("valid amount"),
+        }
     }
 }
 
@@ -162,9 +194,28 @@ pub fn format_amount(amount: i64, decimals: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::account::Account;
+    use crate::currency::Currency;
 
+    /// Accounts with the given names, currencies and whether they're deleted, and their ids.
+    fn accounts_named(accounts: &[(&str, &str, bool)]) -> (Accounts, Vec<AccountId>) {
+        let mut result = Accounts::default();
+        let ids = accounts
+            .iter()
+            .map(|&(name, currency, deleted)| {
+                let id = AccountId::generate();
+                let currency = Currency::parse(currency).unwrap();
+                result.insert(id, Account { name: name.to_owned(), currency, deleted });
+                id
+            })
+            .collect();
+        (result, ids)
+    }
+
+    /// Parses with a single account in PLN, implied by an empty account name.
     fn parse(date: &str, name: &str, category: &str, amount: &str) -> Result<ParsedEntry, EntryError> {
-        ParsedEntry::parse(&DateFormat::iso(), 2, date, name, category, amount)
+        let (accounts, _) = accounts_named(&[("Cash", "PLN", false)]);
+        ParsedEntry::parse(&DateFormat::iso(), &accounts, "", date, name, category, amount)
     }
 
     #[test]
@@ -174,6 +225,47 @@ mod tests {
         assert_eq!(entry.name, "Groceries");
         assert_eq!(entry.category.names(), ["Food", "Shop"]);
         assert_eq!(entry.amount, 1250);
+    }
+
+    #[test]
+    fn finds_accounts_by_name_ignoring_case() {
+        let (accounts, ids) = accounts_named(&[("Silver bank", "PLN", false), ("Gold bank", "EUR", false)]);
+        let account = |name| ParsedEntry::parse(&DateFormat::iso(), &accounts, name, "2026-09-30", "a", "c", "1");
+        assert_eq!(account(" GOLD bank ").map(|entry| entry.account), Ok(ids[1]));
+        assert_eq!(account("silver bank").map(|entry| entry.account), Ok(ids[0]));
+        assert_eq!(account("Bronze bank"), Err(EntryError::UnknownAccount));
+        assert_eq!(account("Gold"), Err(EntryError::UnknownAccount), "names must match fully");
+        assert_eq!(account(" "), Err(EntryError::UnknownAccount), "there are several accounts");
+    }
+
+    #[test]
+    fn rejects_deleted_accounts() {
+        let (accounts, _) = accounts_named(&[("Silver bank", "PLN", false), ("Gold bank", "EUR", true)]);
+        let account = |name| ParsedEntry::parse(&DateFormat::iso(), &accounts, name, "2026-09-30", "a", "c", "1");
+        assert_eq!(account("Gold bank"), Err(EntryError::UnknownAccount));
+    }
+
+    #[test]
+    fn empty_account_is_the_only_active_one() {
+        let (accounts, ids) = accounts_named(&[("Silver bank", "PLN", true), ("Gold bank", "EUR", false)]);
+        let parsed = ParsedEntry::parse(&DateFormat::iso(), &accounts, "", "2026-09-30", "a", "c", "1").unwrap();
+        assert_eq!(parsed.account, ids[1], "deleted accounts don't count");
+
+        let (accounts, _) = accounts_named(&[("Silver bank", "PLN", true)]);
+        let parsed = ParsedEntry::parse(&DateFormat::iso(), &accounts, "", "2026-09-30", "a", "c", "1");
+        assert_eq!(parsed, Err(EntryError::UnknownAccount));
+    }
+
+    #[test]
+    fn parses_amounts_in_the_accounts_currency() {
+        let (accounts, _) = accounts_named(&[("Silver bank", "PLN", false), ("Yen", "JPY", false), ("Dinar", "KWD", false)]);
+        let amount = |account, amount| {
+            ParsedEntry::parse(&DateFormat::iso(), &accounts, account, "2026-09-30", "a", "c", amount).map(|entry| entry.amount)
+        };
+        assert_eq!(amount("Silver bank", "12.5"), Ok(1250));
+        assert_eq!(amount("yen", "1200"), Ok(1200));
+        assert_eq!(amount("yen", "12.5"), Err(EntryError::InvalidAmount));
+        assert_eq!(amount("Dinar", "1.234"), Ok(1234));
     }
 
     #[test]

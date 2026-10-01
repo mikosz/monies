@@ -11,11 +11,15 @@ import { SuggestionLineEdit } from "suggestion-line-edit.slint";
 // through the fields without leaving the editor. The date is prefilled with the last entered
 // date when focused while empty, and Up/Down move it by a day.
 export component EntryEditor {
+    // Whether the account field is shown; without it, the only account is implied.
+    in property <bool> show-account;
     in property <length> column-spacing;
+    in property <length> account-width;
     in property <length> date-width;
     in property <length> amount-width;
     in property <length> flexible-width;
 
+    in-out property <string> account <=> account-input.text;
     in-out property <string> date <=> date-input.text;
     in-out property <string> name <=> name-input.text;
     in-out property <string> category <=> category-input.text;
@@ -24,9 +28,16 @@ export component EntryEditor {
     callback submitted();
     callback cancelled();
 
-    // Focuses the field of `column` and selects its text, so typing replaces it.
+    // The field Tab cycles back to.
+    property <EntryColumn> first-column: root.show-account ? EntryColumn.account : EntryColumn.date;
+
+    // Focuses the field of `column` and selects its text, so typing replaces it. The account
+    // column falls back to the date while hidden.
     public function focus-column(column: EntryColumn) {
-        if (column == EntryColumn.date) {
+        if (column == EntryColumn.account && root.show-account) {
+            account-input.focus();
+            account-input.select-all();
+        } else if (column == EntryColumn.account || column == EntryColumn.date) {
             date-input.focus();
             date-input.select-all();
         } else if (column == EntryColumn.name) {
@@ -41,15 +52,22 @@ export component EntryEditor {
         }
     }
 
-    // Empties all fields and focuses the date, prefilled with the last entered date.
+    // Starts a new entry: the account is the one entries were last added to, if any, and the
+    // other fields are empty. Focuses the account while it's still to be chosen, otherwise the
+    // date, prefilled with the last entered date.
     public function reset() {
+        account-input.text = root.show-account ? EntriesStore.session-account : "";
         date-input.text = "";
         name-input.text = "";
         category-input.text = "";
         amount-input.text = "";
-        date-input.focus();
-        // Focus may not change (e.g. Enter pressed in the date input), so prefill explicitly.
-        date-input.prefill();
+        if (root.show-account && account-input.text == "") {
+            account-input.focus();
+        } else {
+            date-input.focus();
+            // Focus may not change (e.g. Enter pressed in the date input), so prefill explicitly.
+            date-input.prefill();
+        }
     }
 
     // Handles keys every field shares; `first`/`last` say where Tab would leave the editor.
@@ -60,7 +78,7 @@ export component EntryEditor {
         }
         let backwards = event.text == Key.Backtab || (event.text == Key.Tab && event.modifiers.shift);
         if (last && event.text == Key.Tab && !backwards) {
-            root.focus-column(EntryColumn.date);
+            root.focus-column(root.first-column);
             return accept;
         }
         if (first && backwards) {
@@ -70,9 +88,28 @@ export component EntryEditor {
         return reject;
     }
 
+    // Not part of the layout, so that it leaves no gap there while hidden; a placeholder in
+    // the layout takes its place instead. Declared first to come first in the Tab order.
+    account-input := SuggestionLineEdit {
+        x: 0;
+        y: 0;
+        width: root.account-width;
+        height: root.height;
+        visible: root.show-account;
+        enabled: root.show-account;
+        placeholder-text: "Account";
+        suggestions: EntriesStore.account-suggestions;
+        edited(text) => { EntriesStore.account-edited(text); }
+        accepted => { root.submitted(); }
+        key-pressed(event) => { return root.handle-key(event, true, false); }
+    }
+
     HorizontalLayout {
         spacing: root.column-spacing;
 
+        if root.show-account : Rectangle {
+            width: root.account-width;
+        }
         date-input := PrefillLineEdit {
             width: root.date-width;
             placeholder-text: EntriesStore.date-placeholder;
@@ -88,7 +125,7 @@ export component EntryEditor {
                     }
                     return accept;
                 }
-                return root.handle-key(event, true, false);
+                return root.handle-key(event, root.first-column == EntryColumn.date, false);
             }
         }
         name-input := LineEdit {

@@ -194,13 +194,13 @@ export component SettingsPage inherits Page {
         }
 
         // Asks before deleting an account permanently. The backdrop covers the page and takes
-        // its clicks.
+        // its clicks. It isn't tinted: like while editing, the page and the side bar are dimmed
+        // instead (a tint would only darken the page, so the side bar would look undimmed).
         if root.confirming : Rectangle {
             x: 0;
             y: 0;
             width: parent.width;
             height: parent.height;
-            background: #00000060;
 
             TouchArea {}
 

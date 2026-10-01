@@ -267,7 +267,6 @@ mod tests {
 
     use super::*;
     use crate::change::ChangeBuilder;
-    use crate::date_format::DateFormat;
     use crate::entry::ParsedEntry;
 
     /// Builds a change with `build` and applies it.
@@ -288,7 +287,7 @@ mod tests {
     fn add(ledger: &mut Ledger, store: &mut SqliteStore, account: AccountId, rows: &[(&str, &str, &str, &str)]) -> Result<Change, StorageError> {
         perform(ledger, store, |builder| {
             for (date, name, category, amount) in rows {
-                builder.add_entry(ParsedEntry::parse(&DateFormat::iso(), 2, date, name, category, amount).unwrap(), account);
+                builder.add_entry(ParsedEntry::test(account, date, name, category, amount));
             }
         })
     }
@@ -394,7 +393,7 @@ mod tests {
         add(&mut ledger, &mut store, account, &[("2026-10-01", "Rent", "bills", "1")]).unwrap();
         let (id, current) = ledger.entries()[0].clone();
 
-        let parsed = ParsedEntry::parse(&DateFormat::iso(), 2, "2026-10-02", "Flat", "bills.rent", "2").unwrap();
+        let parsed = ParsedEntry::test(account, "2026-10-02", "Flat", "bills.rent", "2");
         let change = perform(&mut ledger, &mut store, |builder| builder.update_entry(id, &current, parsed)).unwrap();
         assert_eq!(store.load().unwrap().entries(), ledger.entries());
         assert_eq!(ledger.entry(id).unwrap().name, "Flat");
@@ -406,6 +405,25 @@ mod tests {
     }
 
     #[test]
+    fn moves_entry_to_another_account_and_back() {
+        let (mut store, mut ledger, cash) = with_account();
+        let bank = add_account(&mut ledger, &mut store, "Bank", "EUR");
+        add(&mut ledger, &mut store, cash, &[("2026-10-01", "Rent", "bills", "1")]).unwrap();
+        let (id, current) = ledger.entries()[0].clone();
+
+        let parsed = ParsedEntry::test(bank, "2026-10-01", "Rent", "bills", "1");
+        let change = perform(&mut ledger, &mut store, |builder| builder.update_entry(id, &current, parsed)).unwrap();
+        let loaded = store.load().unwrap();
+        assert_eq!(loaded.entries(), ledger.entries());
+        assert_eq!(loaded.entry(id).unwrap().account, bank);
+
+        ledger.apply(&mut store, &change.inverse()).unwrap();
+        let loaded = store.load().unwrap();
+        assert_eq!(loaded.entries(), ledger.entries());
+        assert_eq!(loaded.entry(id), Some(&current));
+    }
+
+    #[test]
     fn updating_missing_row_fails() {
         let (mut store, mut ledger, account) = with_account();
         add(&mut ledger, &mut store, account, &[("2026-10-01", "Rent", "bills", "1")]).unwrap();
@@ -413,7 +431,7 @@ mod tests {
         store.connection.execute_batch("DELETE FROM entries").unwrap();
 
         let mut builder = ChangeBuilder::new("Edit", &ledger);
-        let parsed = ParsedEntry::parse(&DateFormat::iso(), 2, "2026-10-01", "Flat", "bills", "1").unwrap();
+        let parsed = ParsedEntry::test(account, "2026-10-01", "Flat", "bills", "1");
         builder.update_entry(id, &current, parsed);
         assert!(matches!(store.apply(&builder.build()), Err(StorageError::MissingRow { table: "entries" })));
     }

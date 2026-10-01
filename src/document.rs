@@ -54,7 +54,6 @@ mod tests {
     use super::*;
     use crate::account::AccountId;
     use crate::change::ChangeBuilder;
-    use crate::date_format::DateFormat;
     use crate::entry::ParsedEntry;
     use crate::store::MemoryStore;
 
@@ -67,7 +66,7 @@ mod tests {
 
     fn add<S: Store>(document: &mut Document<S>, account: AccountId, name: &str) -> Result<(), S::Error> {
         let mut builder = ChangeBuilder::new(format!("Add {name}"), document.ledger());
-        builder.add_entry(ParsedEntry::parse(&DateFormat::iso(), 2, "2026-09-30", name, "bills", "1").unwrap(), account);
+        builder.add_entry(ParsedEntry::test(account, "2026-09-30", name, "bills", "1"));
         let change = builder.build();
         document.perform(change)
     }

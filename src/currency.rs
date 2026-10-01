@@ -1,3 +1,5 @@
+use crate::entry::format_amount;
+
 /// Currencies suggested when typing a code, roughly by how likely they are to be used.
 pub const COMMON: &[&str] = &[
     "PLN", "EUR", "USD", "GBP", "CHF", "CZK", "SEK", "NOK", "DKK", "HUF", "RON", "BGN", "UAH", "JPY", "CNY", "CAD",
@@ -22,6 +24,26 @@ const DECIMALS: &[(&str, u32)] = &[
     ("VND", 0),
 ];
 
+/// Where a currency's symbol goes when writing an amount.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Side {
+    /// Right before the number, e.g. `€12.50`.
+    Before,
+    /// After the number and a space, e.g. `12.50 zł`.
+    After,
+}
+
+/// Symbols of currencies written with one. Other currencies are written with their code after
+/// the number.
+const SYMBOLS: &[(&str, &str, Side)] = &[
+    ("CHF", "CHF", Side::After),
+    ("EUR", "€", Side::Before),
+    ("GBP", "£", Side::Before),
+    ("JPY", "¥", Side::Before),
+    ("PLN", "zł", Side::After),
+    ("USD", "$", Side::Before),
+];
+
 /// An ISO 4217 currency code such as `PLN`. Any three letters are accepted, so currencies
 /// the app doesn't know about can be used too.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -42,6 +64,25 @@ impl Currency {
     /// Number of decimal places of amounts, e.g. 2 for cents. Unknown currencies get 2.
     pub fn decimals(&self) -> u32 {
         DECIMALS.iter().find(|(code, _)| *code == self.code()).map_or(2, |&(_, decimals)| decimals)
+    }
+
+    /// Formats minor units of this currency as a decimal amount with its symbol, e.g.
+    /// `€12.50`, `-7800.00 zł` or, for currencies without a known symbol, `12.50 SEK`. A minus
+    /// always comes first.
+    pub fn format_amount(&self, amount: i64) -> String {
+        let number = format_amount(amount, self.decimals());
+        let (sign, number) = match number.strip_prefix('-') {
+            Some(unsigned) => ("-", unsigned),
+            None => ("", number.as_str()),
+        };
+        let (symbol, side) = match SYMBOLS.iter().find(|(code, ..)| *code == self.code()) {
+            Some(&(_, symbol, side)) => (symbol, side),
+            None => (self.code(), Side::After),
+        };
+        match side {
+            Side::Before => format!("{sign}{symbol}{number}"),
+            Side::After => format!("{sign}{number} {symbol}"),
+        }
     }
 
     /// Common currencies whose code starts with the typed text, ignoring case and surrounding
@@ -86,6 +127,29 @@ mod tests {
         for code in COMMON {
             assert_eq!(Currency::parse(code).unwrap().code(), *code);
         }
+    }
+
+    #[test]
+    fn formats_amounts_with_symbols() {
+        let format = |code, amount| Currency::parse(code).unwrap().format_amount(amount);
+        assert_eq!(format("PLN", 240000), "2400.00 zł");
+        assert_eq!(format("EUR", 1250), "€12.50");
+        assert_eq!(format("USD", 999), "$9.99");
+        assert_eq!(format("GBP", 5), "£0.05");
+        assert_eq!(format("JPY", 1200), "¥1200", "without decimal places");
+        assert_eq!(format("CHF", 1250), "12.50 CHF");
+        assert_eq!(format("SEK", 1250), "12.50 SEK", "the code of currencies without a symbol");
+        assert_eq!(format("KWD", 12500), "12.500 KWD");
+    }
+
+    #[test]
+    fn formats_negative_amounts_with_minus_first() {
+        let format = |code, amount| Currency::parse(code).unwrap().format_amount(amount);
+        assert_eq!(format("EUR", -1250), "-€12.50");
+        assert_eq!(format("PLN", -780000), "-7800.00 zł");
+        assert_eq!(format("SEK", -5), "-0.05 SEK");
+        assert_eq!(format("JPY", -1200), "-¥1200");
+        assert_eq!(format("EUR", 0), "€0.00");
     }
 
     #[test]

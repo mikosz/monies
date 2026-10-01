@@ -67,7 +67,6 @@ pub fn splice<T: PartialEq>(old: &[T], new: Vec<T>) -> Splice<T> {
 mod tests {
     use super::*;
     use crate::change::ChangeBuilder;
-    use crate::date_format::DateFormat;
     use crate::entry::ParsedEntry;
     use crate::store::MemoryStore;
 
@@ -87,7 +86,7 @@ mod tests {
         let account = ledger.add_test_account("Cash");
         for (date, name) in entries {
             let mut builder = ChangeBuilder::new("Add", &ledger);
-            builder.add_entry(ParsedEntry::parse(&DateFormat::iso(), 2, date, name, "bills", "1").unwrap(), account);
+            builder.add_entry(ParsedEntry::test(account, date, name, "bills", "1"));
             let change = builder.build();
             ledger.apply(&mut MemoryStore, &change).unwrap();
         }
@@ -138,7 +137,7 @@ mod tests {
         let mut ledger = ledger(&[("2026-04-10", "cash")]);
         let bank = ledger.add_test_account("Bank");
         let mut builder = ChangeBuilder::new("Add", &ledger);
-        builder.add_entry(ParsedEntry::parse(&DateFormat::iso(), 2, "2026-05-02", "bank", "bills", "1").unwrap(), bank);
+        builder.add_entry(ParsedEntry::test(bank, "2026-05-02", "bank", "bills", "1"));
         builder.delete_account(bank);
         let change = builder.build();
         ledger.apply(&mut MemoryStore, &change).unwrap();
