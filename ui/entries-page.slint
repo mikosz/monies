@@ -25,6 +25,8 @@ export global EntriesStore {
 
     // Suggestions for the current text of the category input.
     in property <[string]> category-suggestions;
+    // The text of the category input, so suggestions can be refreshed after undo/redo.
+    in-out property <string> category-text;
     // Called with the new text whenever the category input changes.
     callback category-edited(string);
 }
@@ -151,6 +153,7 @@ export component EntriesPage inherits Page {
                 min-width: root.flexible-width;
                 preferred-width: root.flexible-width;
                 placeholder-text: "Category, e.g. bills.rent";
+                text <=> EntriesStore.category-text;
                 suggestions: EntriesStore.category-suggestions;
                 // Picking a category continues with its subcategories.
                 pick-suffix: ".";

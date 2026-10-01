@@ -1,9 +1,20 @@
 use std::fmt;
 
 use chrono::NaiveDate;
+use uuid::Uuid;
 
 use crate::category::{CategoryId, CategoryPath};
 use crate::date_format::DateFormat;
+
+/// Identifies an entry. UUIDv7, so ordering by id is ordering by creation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct EntryId(pub Uuid);
+
+impl EntryId {
+    pub fn generate() -> Self {
+        Self(Uuid::now_v7())
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {

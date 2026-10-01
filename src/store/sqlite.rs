@@ -1,29 +1,31 @@
 use std::fmt;
 use std::path::Path;
 
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, Transaction, params};
 
-use super::{NewEntry, Store};
-use crate::category::{Categories, CategoryId, MissingCategories};
-use crate::entry::Entry;
+use super::Store;
+use crate::category::{Categories, CategoryId};
+use crate::change::{Change, Op};
+use crate::entry::{Entry, EntryId};
 use crate::ledger::Ledger;
 
 /// Schema migrations; the database's `user_version` is the number of migrations applied.
-/// Never edit a released migration, append a new one instead.
+/// Once there's real data, never edit a migration, append a new one instead.
 const MIGRATIONS: &[&str] = &[
-    // 1: initial schema. Dates are ISO `YYYY-MM-DD` text, amounts are cents.
+    // 1: initial schema. Ids are UUIDv7 as 16-byte BLOBs, so they sort by creation. Dates are
+    // ISO `YYYY-MM-DD` text, amounts are cents.
     "CREATE TABLE categories (
-        id        INTEGER PRIMARY KEY,
+        id        BLOB PRIMARY KEY CHECK (length(id) = 16),
         name      TEXT NOT NULL CHECK (name <> ''),
-        parent_id INTEGER REFERENCES categories(id)
+        parent_id BLOB REFERENCES categories(id)
     );
     CREATE INDEX categories_parent ON categories(parent_id);
 
     CREATE TABLE entries (
-        id          INTEGER PRIMARY KEY,
+        id          BLOB PRIMARY KEY CHECK (length(id) = 16),
         date        TEXT NOT NULL CHECK (date IS date(date)),
         name        TEXT NOT NULL,
-        category_id INTEGER NOT NULL REFERENCES categories(id),
+        category_id BLOB NOT NULL REFERENCES categories(id),
         amount      INTEGER NOT NULL
     );
     CREATE INDEX entries_date ON entries(date);
@@ -36,6 +38,8 @@ pub enum StorageError {
     Io(std::io::Error),
     /// The database was written by a newer version of the app.
     NewerSchema { found: i64, supported: usize },
+    /// A row to be deleted doesn't exist: the database and the app's state disagree.
+    MissingRow { table: &'static str },
 }
 
 impl fmt::Display for StorageError {
@@ -47,6 +51,7 @@ impl fmt::Display for StorageError {
                 f,
                 "the database has schema version {found}, but this version of the app supports up to {supported}"
             ),
+            StorageError::MissingRow { table } => write!(f, "a row to be deleted is missing from {table}"),
         }
     }
 }
@@ -56,7 +61,7 @@ impl std::error::Error for StorageError {
         match self {
             StorageError::Sqlite(error) => Some(error),
             StorageError::Io(error) => Some(error),
-            StorageError::NewerSchema { .. } => None,
+            StorageError::NewerSchema { .. } | StorageError::MissingRow { .. } => None,
         }
     }
 }
@@ -98,29 +103,28 @@ impl SqliteStore {
         Ok(Self { connection })
     }
 
-    /// Reads all categories and entries. Entries keep the order in which they were added.
+    /// Reads all categories and entries.
     pub fn load(&self) -> Result<Ledger, StorageError> {
         let mut categories = Categories::default();
         let mut statement = self.connection.prepare("SELECT id, name, parent_id FROM categories")?;
         let rows = statement.query_map([], |row| {
-            Ok((CategoryId(row.get(0)?), row.get(1)?, row.get::<_, Option<i64>>(2)?.map(CategoryId)))
+            Ok((CategoryId(row.get(0)?), row.get(1)?, row.get::<_, Option<_>>(2)?.map(CategoryId)))
         })?;
         for row in rows {
             let (id, name, parent) = row?;
             categories.insert(id, name, parent);
         }
 
-        let mut statement = self
-            .connection
-            .prepare("SELECT date, name, category_id, amount FROM entries ORDER BY id")?;
+        let mut statement = self.connection.prepare("SELECT id, date, name, category_id, amount FROM entries")?;
         let entries = statement
             .query_map([], |row| {
-                Ok(Entry {
-                    date: row.get(0)?,
-                    name: row.get(1)?,
-                    category: CategoryId(row.get(2)?),
-                    amount: row.get(3)?,
-                })
+                let entry = Entry {
+                    date: row.get(1)?,
+                    name: row.get(2)?,
+                    category: CategoryId(row.get(3)?),
+                    amount: row.get(4)?,
+                };
+                Ok((EntryId(row.get(0)?), entry))
             })?
             .collect::<Result<Vec<_>, _>>()?;
 
@@ -131,34 +135,44 @@ impl SqliteStore {
 impl Store for SqliteStore {
     type Error = StorageError;
 
-    fn insert_entry(
-        &mut self,
-        categories: MissingCategories<'_>,
-        entry: NewEntry<'_>,
-    ) -> Result<Vec<CategoryId>, StorageError> {
+    fn apply(&mut self, change: &Change) -> Result<(), StorageError> {
         let transaction = self.connection.transaction()?;
-
-        let mut ids = Vec::with_capacity(categories.names.len());
-        let mut parent = categories.parent;
-        for name in categories.names {
-            transaction.execute(
-                "INSERT INTO categories (name, parent_id) VALUES (?1, ?2)",
-                params![name, parent.map(|id| id.0)],
-            )?;
-            let id = CategoryId(transaction.last_insert_rowid());
-            ids.push(id);
-            parent = Some(id);
+        for op in &change.ops {
+            apply_op(&transaction, op)?;
         }
-
-        let category = parent.expect("an entry always has a category");
-        transaction.execute(
-            "INSERT INTO entries (date, name, category_id, amount) VALUES (?1, ?2, ?3, ?4)",
-            params![entry.date, entry.name, category.0, entry.amount],
-        )?;
-
         transaction.commit()?;
-        Ok(ids)
+        Ok(())
     }
+}
+
+fn apply_op(transaction: &Transaction, op: &Op) -> Result<(), StorageError> {
+    match op {
+        Op::InsertCategory { id, name, parent } => {
+            transaction.execute(
+                "INSERT INTO categories (id, name, parent_id) VALUES (?1, ?2, ?3)",
+                params![id.0, name, parent.map(|parent| parent.0)],
+            )?;
+        }
+        Op::DeleteCategory { id, .. } => {
+            let deleted = transaction.execute("DELETE FROM categories WHERE id = ?1", params![id.0])?;
+            if deleted != 1 {
+                return Err(StorageError::MissingRow { table: "categories" });
+            }
+        }
+        Op::InsertEntry { id, entry } => {
+            transaction.execute(
+                "INSERT INTO entries (id, date, name, category_id, amount) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![id.0, entry.date, entry.name, entry.category.0, entry.amount],
+            )?;
+        }
+        Op::DeleteEntry { id, .. } => {
+            let deleted = transaction.execute("DELETE FROM entries WHERE id = ?1", params![id.0])?;
+            if deleted != 1 {
+                return Err(StorageError::MissingRow { table: "entries" });
+            }
+        }
+    }
+    Ok(())
 }
 
 fn migrate(connection: &mut Connection) -> Result<(), StorageError> {
@@ -179,12 +193,25 @@ fn migrate(connection: &mut Connection) -> Result<(), StorageError> {
 
 #[cfg(test)]
 mod tests {
+    use uuid::Uuid;
+
     use super::*;
+    use crate::change::ChangeBuilder;
     use crate::date_format::DateFormat;
     use crate::entry::ParsedEntry;
 
-    fn parsed(date: &str, name: &str, category: &str, amount: &str) -> ParsedEntry {
-        ParsedEntry::parse(&DateFormat::iso(), date, name, category, amount).unwrap()
+    fn add(ledger: &mut Ledger, store: &mut SqliteStore, rows: &[(&str, &str, &str, &str)]) -> Result<Change, StorageError> {
+        let mut builder = ChangeBuilder::new("Add", ledger.categories());
+        for (date, name, category, amount) in rows {
+            builder.add_entry(ParsedEntry::parse(&DateFormat::iso(), date, name, category, amount).unwrap());
+        }
+        let change = builder.build();
+        ledger.apply(store, &change)?;
+        Ok(change)
+    }
+
+    fn count(store: &SqliteStore, table: &str) -> i64 {
+        store.connection.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row.get(0)).unwrap()
     }
 
     fn user_version(store: &SqliteStore) -> i64 {
@@ -219,44 +246,74 @@ mod tests {
     fn saves_and_loads_entries() {
         let mut store = SqliteStore::open_in_memory().unwrap();
         let mut ledger = Ledger::default();
-        ledger.add_entry(&mut store, parsed("2026-10-01", "Rent", "bills.rent", "-1200.50")).unwrap();
-        ledger.add_entry(&mut store, parsed("2026-09-15", "Vet", "dogs.health", "80")).unwrap();
-        ledger.add_entry(&mut store, parsed("2026-09-20", "Water", "Bills.water", "30")).unwrap();
+        add(&mut ledger, &mut store, &[("2026-10-01", "Rent", "bills.rent", "-1200.50")]).unwrap();
+        add(&mut ledger, &mut store, &[("2026-09-15", "Vet", "dogs.health", "80"), ("2026-09-20", "Water", "Bills.water", "30")]).unwrap();
 
         let loaded = store.load().unwrap();
         assert_eq!(loaded.entries(), ledger.entries());
-        let paths: Vec<String> = loaded.entries().iter().map(|e| loaded.categories().path(e.category)).collect();
-        assert_eq!(paths, ["bills.rent", "dogs.health", "bills.water"]);
+        let paths: Vec<String> = loaded.entries().iter().map(|(_, e)| loaded.categories().path(e.category)).collect();
+        assert_eq!(paths, ["bills.rent", "dogs.health", "bills.water"], "in the order entered");
         assert_eq!(loaded.categories().suggest(""), ["bills", "dogs"]);
     }
 
     #[test]
-    fn failed_write_changes_nothing() {
+    fn inverse_change_restores_database() {
+        let mut store = SqliteStore::open_in_memory().unwrap();
+        let mut ledger = Ledger::default();
+        add(&mut ledger, &mut store, &[("2026-10-01", "Rent", "bills.rent", "1")]).unwrap();
+        let change = add(&mut ledger, &mut store, &[("2026-10-02", "Vet", "dogs.health", "2"), ("2026-10-03", "Water", "bills.water", "3")]).unwrap();
+        assert_eq!((count(&store, "entries"), count(&store, "categories")), (3, 5));
+
+        ledger.apply(&mut store, &change.inverse()).unwrap();
+        assert_eq!((count(&store, "entries"), count(&store, "categories")), (1, 2));
+        assert_eq!(store.load().unwrap().entries(), ledger.entries());
+
+        ledger.apply(&mut store, &change).unwrap();
+        assert_eq!((count(&store, "entries"), count(&store, "categories")), (3, 5));
+        assert_eq!(store.load().unwrap().entries(), ledger.entries());
+    }
+
+    #[test]
+    fn failed_change_changes_nothing() {
         let mut store = SqliteStore::open_in_memory().unwrap();
         let mut ledger = Ledger::default();
         store.connection.execute_batch("DROP TABLE entries").unwrap();
 
-        assert!(ledger.add_entry(&mut store, parsed("2026-10-01", "Rent", "bills.rent", "1")).is_err());
+        assert!(add(&mut ledger, &mut store, &[("2026-10-01", "Rent", "bills.rent", "1")]).is_err());
         assert!(ledger.entries().is_empty());
         assert!(ledger.categories().suggest("").is_empty());
-        let categories: i64 = store.connection.query_row("SELECT count(*) FROM categories", [], |row| row.get(0)).unwrap();
-        assert_eq!(categories, 0, "category inserts are rolled back");
+        assert_eq!(count(&store, "categories"), 0, "category inserts are rolled back");
+    }
+
+    #[test]
+    fn deleting_missing_row_fails() {
+        let mut store = SqliteStore::open_in_memory().unwrap();
+        let mut ledger = Ledger::default();
+        let change = add(&mut ledger, &mut store, &[("2026-10-01", "Rent", "bills", "1")]).unwrap();
+        store.connection.execute_batch("DELETE FROM entries").unwrap();
+
+        assert!(matches!(store.apply(&change.inverse()), Err(StorageError::MissingRow { table: "entries" })));
+        assert_eq!(count(&store, "categories"), 1, "nothing was deleted");
     }
 
     #[test]
     fn rejects_invalid_dates_and_unknown_categories() {
         let store = SqliteStore::open_in_memory().unwrap();
-        store.connection.execute("INSERT INTO categories (id, name) VALUES (1, 'bills')", []).unwrap();
-        let insert = |date: &str, category: i64| {
+        let bills = Uuid::now_v7();
+        store
+            .connection
+            .execute("INSERT INTO categories (id, name) VALUES (?1, 'bills')", params![bills])
+            .unwrap();
+        let insert = |date: &str, category: Uuid| {
             store.connection.execute(
-                "INSERT INTO entries (date, name, category_id, amount) VALUES (?1, 'x', ?2, 1)",
-                params![date, category],
+                "INSERT INTO entries (id, date, name, category_id, amount) VALUES (?1, ?2, 'x', ?3, 1)",
+                params![Uuid::now_v7(), date, category],
             )
         };
-        assert!(insert("2026-10-01", 1).is_ok());
+        assert!(insert("2026-10-01", bills).is_ok());
         for date in ["2026-02-30", "1.10.2026", "2026-1-1", ""] {
-            assert!(insert(date, 1).is_err(), "date: {date:?}");
+            assert!(insert(date, bills).is_err(), "date: {date:?}");
         }
-        assert!(insert("2026-10-01", 2).is_err(), "foreign keys are enforced");
+        assert!(insert("2026-10-01", Uuid::now_v7()).is_err(), "foreign keys are enforced");
     }
 }

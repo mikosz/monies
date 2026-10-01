@@ -38,7 +38,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 }
 
-/// Creates the database and adds every CSV row; returns the number of entries.
+/// Creates the database and adds every CSV row in one transaction; returns the number of
+/// entries.
 fn fill(database: &Path, csv: &Path) -> Result<usize, Box<dyn Error>> {
     let mut writer = DatabaseWriter::create(database)?;
     let mut reader = csv::Reader::from_path(csv)?;
@@ -53,5 +54,6 @@ fn fill(database: &Path, csv: &Path) -> Result<usize, Box<dyn Error>> {
             .map_err(|error| format!("{} line {line}: {error}", csv.display()))?;
         count += 1;
     }
+    writer.finish()?;
     Ok(count)
 }

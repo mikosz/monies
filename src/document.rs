@@ -1,0 +1,131 @@
+use crate::change::Change;
+use crate::history::History;
+use crate::ledger::{EntryListUpdate, Ledger};
+use crate::store::Store;
+
+/// How many changes can be undone.
+const HISTORY_LIMIT: usize = 1000;
+
+/// The ledger together with where it's stored and its undo history. All user changes go
+/// through here.
+pub struct Document<S: Store> {
+    ledger: Ledger,
+    store: S,
+    history: History,
+}
+
+impl<S: Store> Document<S> {
+    pub fn new(ledger: Ledger, store: S) -> Self {
+        Self { ledger, store, history: History::new(HISTORY_LIMIT) }
+    }
+
+    pub fn ledger(&self) -> &Ledger {
+        &self.ledger
+    }
+
+    /// Applies a change made by the user and makes it undoable.
+    pub fn perform(&mut self, change: Change) -> Result<Vec<EntryListUpdate>, S::Error> {
+        let updates = self.ledger.apply(&mut self.store, &change)?;
+        self.history.record(change);
+        Ok(updates)
+    }
+
+    /// Reverts the last change; `Ok(None)` when there's nothing to undo. On error nothing
+    /// changes, including the history.
+    pub fn undo(&mut self) -> Result<Option<Vec<EntryListUpdate>>, S::Error> {
+        let Some(change) = self.history.next_undo() else { return Ok(None) };
+        let updates = self.ledger.apply(&mut self.store, &change.inverse())?;
+        self.history.undone();
+        Ok(Some(updates))
+    }
+
+    /// Applies the last undone change again; `Ok(None)` when there's nothing to redo. On error
+    /// nothing changes, including the history.
+    pub fn redo(&mut self) -> Result<Option<Vec<EntryListUpdate>>, S::Error> {
+        let Some(change) = self.history.next_redo() else { return Ok(None) };
+        let updates = self.ledger.apply(&mut self.store, change)?;
+        self.history.redone();
+        Ok(Some(updates))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::change::ChangeBuilder;
+    use crate::date_format::DateFormat;
+    use crate::entry::ParsedEntry;
+    use crate::store::MemoryStore;
+
+    fn add(document: &mut Document<MemoryStore>, name: &str) {
+        let mut builder = ChangeBuilder::new(format!("Add {name}"), document.ledger().categories());
+        builder.add_entry(ParsedEntry::parse(&DateFormat::iso(), "2026-09-30", name, "bills", "1").unwrap());
+        document.perform(builder.build()).unwrap();
+    }
+
+    fn names(document: &Document<MemoryStore>) -> Vec<&str> {
+        document.ledger().entries().iter().map(|(_, e)| e.name.as_str()).collect()
+    }
+
+    #[test]
+    fn undoes_and_redoes_changes() {
+        let mut document = Document::new(Ledger::default(), MemoryStore);
+        add(&mut document, "a");
+        add(&mut document, "b");
+
+        document.undo().unwrap().unwrap();
+        assert_eq!(names(&document), ["a"]);
+        document.undo().unwrap().unwrap();
+        assert!(names(&document).is_empty());
+        assert!(document.undo().unwrap().is_none(), "nothing left to undo");
+
+        document.redo().unwrap().unwrap();
+        document.redo().unwrap().unwrap();
+        assert_eq!(names(&document), ["a", "b"]);
+        assert!(document.redo().unwrap().is_none(), "nothing left to redo");
+    }
+
+    #[test]
+    fn new_change_discards_redo() {
+        let mut document = Document::new(Ledger::default(), MemoryStore);
+        add(&mut document, "a");
+        document.undo().unwrap();
+        add(&mut document, "b");
+
+        assert!(document.redo().unwrap().is_none());
+        assert_eq!(names(&document), ["b"]);
+    }
+
+    /// Fails every write while `failing` is set.
+    struct FlakyStore {
+        failing: bool,
+    }
+
+    impl Store for FlakyStore {
+        type Error = std::fmt::Error;
+
+        fn apply(&mut self, _change: &Change) -> Result<(), Self::Error> {
+            if self.failing { Err(std::fmt::Error) } else { Ok(()) }
+        }
+    }
+
+    #[test]
+    fn failed_undo_and_redo_change_nothing() {
+        let mut document = Document::new(Ledger::default(), FlakyStore { failing: false });
+        let mut builder = ChangeBuilder::new("Add", document.ledger().categories());
+        builder.add_entry(ParsedEntry::parse(&DateFormat::iso(), "2026-09-30", "a", "bills", "1").unwrap());
+        document.perform(builder.build()).unwrap();
+
+        document.store.failing = true;
+        assert!(document.undo().is_err());
+        assert_eq!(document.ledger().entries().len(), 1);
+        document.store.failing = false;
+        assert!(document.undo().unwrap().is_some(), "the change is still undoable");
+
+        document.store.failing = true;
+        assert!(document.redo().is_err());
+        assert!(document.ledger().entries().is_empty());
+        document.store.failing = false;
+        assert!(document.redo().unwrap().is_some(), "the change is still redoable");
+    }
+}

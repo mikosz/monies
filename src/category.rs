@@ -1,11 +1,19 @@
 use std::collections::BTreeMap;
 
+use uuid::Uuid;
+
 /// Separates category names in a path, e.g. `dogs.health.pills`.
 pub const SEPARATOR: char = '.';
 
-/// Identifies a category; assigned by the store (the database row id).
+/// Identifies a category. UUIDv7, so it can be created on any device without coordination.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct CategoryId(pub i64);
+pub struct CategoryId(pub Uuid);
+
+impl CategoryId {
+    pub fn generate() -> Self {
+        Self(Uuid::now_v7())
+    }
+}
 
 #[derive(Debug, Clone)]
 struct Category {
@@ -50,7 +58,7 @@ pub struct MissingCategories<'a> {
 /// a category is reflected everywhere it's used.
 ///
 /// Names are matched case-insensitively; a category keeps the spelling it was created with.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct Categories {
     categories: BTreeMap<CategoryId, Category>,
 }
@@ -60,6 +68,11 @@ impl Categories {
     /// must exist before the tree is queried.
     pub fn insert(&mut self, id: CategoryId, name: String, parent: Option<CategoryId>) {
         self.categories.insert(id, Category { name, parent });
+    }
+
+    /// Removes a category. Its children and entries must have been removed already.
+    pub fn remove(&mut self, id: CategoryId) {
+        self.categories.remove(&id);
     }
 
     pub fn find(&self, path: &CategoryPath) -> Option<CategoryId> {
@@ -166,12 +179,12 @@ mod tests {
     }
 
     impl Categories {
-        /// Creates missing categories with ids following the highest existing one.
+        /// Creates missing categories.
         fn get_or_create(&mut self, path: &CategoryPath) -> CategoryId {
             let missing = self.missing(path);
             let mut parent = missing.parent;
             for name in missing.names {
-                let id = CategoryId(self.categories.keys().last().map_or(1, |id| id.0 + 1));
+                let id = CategoryId::generate();
                 self.insert(id, name.clone(), parent);
                 parent = Some(id);
             }
@@ -226,11 +239,15 @@ mod tests {
 
     #[test]
     fn allows_parents_inserted_after_children() {
+        let (bills, rent) = (CategoryId::generate(), CategoryId::generate());
         let mut categories = Categories::default();
-        categories.insert(CategoryId(2), "rent".to_owned(), Some(CategoryId(1)));
-        categories.insert(CategoryId(1), "bills".to_owned(), None);
-        assert_eq!(categories.path(CategoryId(2)), "bills.rent");
-        assert_eq!(categories.find(&path("bills.rent")), Some(CategoryId(2)));
+        categories.insert(rent, "rent".to_owned(), Some(bills));
+        categories.insert(bills, "bills".to_owned(), None);
+        assert_eq!(categories.path(rent), "bills.rent");
+        assert_eq!(categories.find(&path("bills.rent")), Some(rent));
+
+        categories.remove(rent);
+        assert_eq!(categories.find(&path("bills.rent")), None);
     }
 
     #[test]

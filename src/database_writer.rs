@@ -1,6 +1,8 @@
 use std::error::Error;
 use std::path::Path;
 
+use crate::category::Categories;
+use crate::change::ChangeBuilder;
 use crate::date_format::DateFormat;
 use crate::entry::ParsedEntry;
 use crate::ledger::Ledger;
@@ -10,7 +12,7 @@ use crate::store::sqlite::SqliteStore;
 /// generating sample data (see `examples/sample_db`); the app itself doesn't use it.
 pub struct DatabaseWriter {
     store: SqliteStore,
-    ledger: Ledger,
+    change: ChangeBuilder,
 }
 
 impl DatabaseWriter {
@@ -19,14 +21,22 @@ impl DatabaseWriter {
         if path.exists() {
             return Err(format!("{} already exists", path.display()).into());
         }
-        Ok(Self { store: SqliteStore::open(path)?, ledger: Ledger::default() })
+        let store = SqliteStore::open(path)?;
+        Ok(Self { store, change: ChangeBuilder::new("Import", &Categories::default()) })
     }
 
     /// Adds an entry given as it would be typed in the app, except that the date is ISO
-    /// `YYYY-MM-DD`. Entries are kept in the order they're added.
+    /// `YYYY-MM-DD`. Entries are kept in the order they're added. Nothing is written until
+    /// [`Self::finish`].
     pub fn add_entry(&mut self, date: &str, name: &str, category: &str, amount: &str) -> Result<(), Box<dyn Error>> {
         let parsed = ParsedEntry::parse(&DateFormat::iso(), date, name, category, amount)?;
-        self.ledger.add_entry(&mut self.store, parsed)?;
+        self.change.add_entry(parsed);
+        Ok(())
+    }
+
+    /// Writes all added entries in a single transaction.
+    pub fn finish(mut self) -> Result<(), Box<dyn Error>> {
+        Ledger::default().apply(&mut self.store, &self.change.build())?;
         Ok(())
     }
 }

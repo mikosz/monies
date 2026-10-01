@@ -1,18 +1,28 @@
 use crate::category::Categories;
-use crate::entry::{Entry, ParsedEntry};
-use crate::store::{NewEntry, Store};
+use crate::change::{Change, Op};
+use crate::entry::{Entry, EntryId};
+use crate::store::Store;
 
 /// All of the user's data: entries and the categories they refer to.
 #[derive(Debug, Default)]
 pub struct Ledger {
     categories: Categories,
-    /// In the order they were added.
-    entries: Vec<Entry>,
+    /// Sorted by id, which is the order in which entries were added.
+    entries: Vec<(EntryId, Entry)>,
+}
+
+/// How the list of entries changed while a [`Change`] was applied, in the order it happened.
+/// Indices refer to the list at that moment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryListUpdate {
+    Inserted { index: usize, id: EntryId },
+    Removed { index: usize },
 }
 
 impl Ledger {
     #[cfg_attr(target_arch = "wasm32", expect(dead_code, reason = "only used when loading from a database"))]
-    pub fn new(categories: Categories, entries: Vec<Entry>) -> Self {
+    pub fn new(categories: Categories, mut entries: Vec<(EntryId, Entry)>) -> Self {
+        entries.sort_by_key(|(id, _)| *id);
         Self { categories, entries }
     }
 
@@ -20,86 +30,97 @@ impl Ledger {
         &self.categories
     }
 
-    pub fn entries(&self) -> &[Entry] {
+    /// In the order they were added.
+    pub fn entries(&self) -> &[(EntryId, Entry)] {
         &self.entries
     }
 
-    /// Stores a validated entry, creating its category if needed. The ledger is only changed
-    /// once the store has succeeded.
-    pub fn add_entry<S: Store>(&mut self, store: &mut S, parsed: ParsedEntry) -> Result<(), S::Error> {
-        let missing = self.categories.missing(&parsed.category);
-        let entry = NewEntry { date: parsed.date, name: &parsed.name, amount: parsed.amount };
-        let ids = store.insert_entry(missing, entry)?;
-        debug_assert_eq!(ids.len(), missing.names.len());
+    pub fn entry(&self, id: EntryId) -> Option<&Entry> {
+        self.index_of(id).ok().map(|index| &self.entries[index].1)
+    }
 
-        let mut category = missing.parent;
-        for (&id, name) in ids.iter().zip(missing.names) {
-            self.categories.insert(id, name.clone(), category);
-            category = Some(id);
+    /// Applies a change to the store and then, once that succeeded, to the ledger.
+    pub fn apply<S: Store>(&mut self, store: &mut S, change: &Change) -> Result<Vec<EntryListUpdate>, S::Error> {
+        store.apply(change)?;
+        Ok(change.ops.iter().filter_map(|op| self.apply_op(op)).collect())
+    }
+
+    fn apply_op(&mut self, op: &Op) -> Option<EntryListUpdate> {
+        match op {
+            Op::InsertCategory { id, name, parent } => {
+                self.categories.insert(*id, name.clone(), *parent);
+                None
+            }
+            Op::DeleteCategory { id, .. } => {
+                self.categories.remove(*id);
+                None
+            }
+            Op::InsertEntry { id, entry } => {
+                let index = self.index_of(*id).expect_err("entry ids are unique");
+                self.entries.insert(index, (*id, entry.clone()));
+                Some(EntryListUpdate::Inserted { index, id: *id })
+            }
+            Op::DeleteEntry { id, .. } => {
+                let index = self.index_of(*id).expect("deleted entry exists");
+                self.entries.remove(index);
+                Some(EntryListUpdate::Removed { index })
+            }
         }
-        self.entries.push(Entry {
-            date: parsed.date,
-            name: parsed.name,
-            category: category.expect("an entry always has a category"),
-            amount: parsed.amount,
-        });
-        Ok(())
+    }
+
+    fn index_of(&self, id: EntryId) -> Result<usize, usize> {
+        self.entries.binary_search_by_key(&id, |(id, _)| *id)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::change::ChangeBuilder;
     use crate::date_format::DateFormat;
+    use crate::entry::ParsedEntry;
     use crate::store::MemoryStore;
 
-    fn parsed(category: &str) -> ParsedEntry {
-        ParsedEntry::parse(&DateFormat::iso(), "2026-09-30", "Rent", category, "1").unwrap()
+    fn add(ledger: &mut Ledger, category: &str) -> (Change, Vec<EntryListUpdate>) {
+        let mut builder = ChangeBuilder::new("Add", ledger.categories());
+        builder.add_entry(ParsedEntry::parse(&DateFormat::iso(), "2026-09-30", "Rent", category, "1").unwrap());
+        let change = builder.build();
+        let updates = ledger.apply(&mut MemoryStore, &change).unwrap();
+        (change, updates)
+    }
+
+    fn paths(ledger: &Ledger) -> Vec<String> {
+        ledger.entries().iter().map(|(_, e)| ledger.categories().path(e.category)).collect()
     }
 
     #[test]
-    fn adds_entry_with_new_category() {
+    fn adds_entries_in_order() {
         let mut ledger = Ledger::default();
-        ledger.add_entry(&mut MemoryStore::default(), parsed("bills.rent")).unwrap();
+        let (_, first) = add(&mut ledger, "bills.rent");
+        let (_, second) = add(&mut ledger, "Bills.Rent");
+        add(&mut ledger, "dogs");
 
-        let entry = &ledger.entries()[0];
-        assert_eq!(ledger.categories().path(entry.category), "bills.rent");
-        assert_eq!(ledger.categories().suggest(""), ["bills"]);
+        assert!(matches!(first[..], [EntryListUpdate::Inserted { index: 0, .. }]));
+        assert!(matches!(second[..], [EntryListUpdate::Inserted { index: 1, .. }]));
+        assert_eq!(paths(&ledger), ["bills.rent", "bills.rent", "dogs"]);
+        assert_eq!(ledger.entries()[0].1.category, ledger.entries()[1].1.category);
     }
 
     #[test]
-    fn reuses_existing_category() {
-        let mut store = MemoryStore::default();
+    fn inverse_restores_previous_state() {
         let mut ledger = Ledger::default();
-        ledger.add_entry(&mut store, parsed("bills.rent")).unwrap();
-        ledger.add_entry(&mut store, parsed("Bills.Rent")).unwrap();
+        add(&mut ledger, "bills.rent");
+        let (change, _) = add(&mut ledger, "dogs.health");
+        add(&mut ledger, "bills.water");
 
-        let [first, second] = ledger.entries() else { panic!("expected two entries") };
-        assert_eq!(first.category, second.category);
-    }
+        let updates = ledger.apply(&mut MemoryStore, &change.inverse()).unwrap();
+        assert_eq!(updates, [EntryListUpdate::Removed { index: 1 }]);
+        assert_eq!(paths(&ledger), ["bills.rent", "bills.water"]);
+        assert!(ledger.categories().suggest("dogs").is_empty(), "categories created by the change are removed");
 
-    #[test]
-    fn empty_names_in_category_are_ignored() {
-        let mut store = MemoryStore::default();
-        let mut ledger = Ledger::default();
-        for category in ["bills", "bills.", ".bills", "bills.."] {
-            ledger.add_entry(&mut store, parsed(category)).unwrap();
-        }
-
-        let first = ledger.entries()[0].category;
-        assert!(ledger.entries().iter().all(|entry| entry.category == first));
-        assert_eq!(ledger.categories().path(first), "bills");
-    }
-
-    #[test]
-    fn adds_only_missing_categories() {
-        let mut store = MemoryStore::default();
-        let mut ledger = Ledger::default();
-        ledger.add_entry(&mut store, parsed("dogs.health")).unwrap();
-        ledger.add_entry(&mut store, parsed("dogs.health.pills")).unwrap();
-
-        let pills = ledger.entries()[1].category;
-        assert_eq!(ledger.categories().path(pills), "dogs.health.pills");
-        assert_eq!(ledger.categories().suggest("dogs."), ["dogs.health"]);
+        let updates = ledger.apply(&mut MemoryStore, &change).unwrap();
+        let [EntryListUpdate::Inserted { index: 1, id }] = updates[..] else { panic!("{updates:?}") };
+        assert_eq!(paths(&ledger), ["bills.rent", "dogs.health", "bills.water"], "redo puts it back in place");
+        assert!(ledger.entry(id).is_some());
     }
 }

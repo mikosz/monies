@@ -10,13 +10,17 @@ build = "build.rs"
 slint = "1.18"
 # `clock` provides today's date; `wasmbind` makes it work in the browser.
 chrono = { version = "0.4.45", default-features = false, features = ["std", "clock", "wasmbind"] }
+# Ids are UUIDv7: unique across devices (for sync) and ordered by creation.
+uuid = { version = "1.26", features = ["v7"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2.129"
+# Time and randomness for UUIDs come from JavaScript in the browser.
+uuid = { version = "1.26", features = ["js"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-# `bundled` compiles SQLite in; `chrono` maps NaiveDate to ISO text.
-rusqlite = { version = "0.40", features = ["bundled", "chrono"] }
+# `bundled` compiles SQLite in; `chrono` maps NaiveDate to ISO text; `uuid` maps Uuid to BLOB.
+rusqlite = { version = "0.40", features = ["bundled", "chrono", "uuid"] }
 directories = "6"
 
 [target.'cfg(windows)'.dependencies]

@@ -4,15 +4,46 @@ import { EntriesPage, EntriesStore, EntryRow } from "entries-page.slint";
 
 export { EntriesStore, EntryRow }
 
+// Undo/redo of changes to the data (not of text being typed in a field).
+export global UndoRedo {
+    callback undo();
+    callback redo();
+}
+
 export component MainWindow inherits Window {
     title: "Monies!";
 
-    HorizontalLayout {
-        side-bar := SideBar {
-//            title: "How do I hide this label?";
-            model: ["Entries", "Summary"];
+    // Intercepts the shortcuts before the focused element (e.g. a LineEdit with its own text
+    // undo) sees them. Never takes focus itself.
+    FocusScope {
+        focus-on-click: false;
+        focus-on-tab-navigation: false;
+
+        capture-key-pressed(event) => {
+            if (event.modifiers.control && !event.modifiers.alt) {
+                if (event.text == "z" || event.text == "Z") {
+                    if (event.modifiers.shift) {
+                        UndoRedo.redo();
+                    } else {
+                        UndoRedo.undo();
+                    }
+                    return accept;
+                }
+                if ((event.text == "y" || event.text == "Y") && !event.modifiers.shift) {
+                    UndoRedo.redo();
+                    return accept;
+                }
+            }
+            return reject;
         }
 
-        if(side-bar.current-item == 0) : EntriesPage {}
+        HorizontalLayout {
+            side-bar := SideBar {
+//                title: "How do I hide this label?";
+                model: ["Entries", "Summary"];
+            }
+
+            if(side-bar.current-item == 0) : EntriesPage {}
+        }
     }
 }
