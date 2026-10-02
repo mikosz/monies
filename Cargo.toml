@@ -33,5 +33,6 @@ slint-build = "1.18"
 csv = "1.4"
 
 [lib]
-# Distinct from the binary's name so their outputs (e.g. .pdb on Windows) don't collide.
+# Distinct from the binary's name for historical reasons: their outputs (.pdb on Windows)
+# collided while the library was also built as a cdylib for the browser.
 name = "monies_app"
