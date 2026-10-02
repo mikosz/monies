@@ -2,7 +2,6 @@ mod account;
 mod category;
 mod change;
 mod currency;
-#[cfg(not(target_arch = "wasm32"))]
 mod database_writer;
 mod date_format;
 mod document;
@@ -33,29 +32,20 @@ use ledger::Ledger;
 use store::Store;
 use view::View;
 
-#[cfg(not(target_arch = "wasm32"))]
 #[doc(hidden)]
 pub use database_writer::DatabaseWriter;
 
 slint::include_modules!();
 
 /// Opens the database and loads its contents.
-#[cfg(not(target_arch = "wasm32"))]
 fn open_store() -> Result<(impl Store + 'static, Ledger), Box<dyn Error>> {
     let store = store::sqlite::SqliteStore::open(&database_path()?)?;
     let ledger = store.load()?;
     Ok((store, ledger))
 }
 
-/// There's no database in the browser yet: data lives only as long as the page.
-#[cfg(target_arch = "wasm32")]
-fn open_store() -> Result<(impl Store + 'static, Ledger), Box<dyn Error>> {
-    Ok((store::MemoryStore, Ledger::default()))
-}
-
 /// `--db <path>` if given, otherwise `Monies/monies.db` in the user's data directory
 /// (`%APPDATA%` on Windows).
-#[cfg(not(target_arch = "wasm32"))]
 fn database_path() -> Result<std::path::PathBuf, Box<dyn Error>> {
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -205,27 +195,23 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     });
 
     let imports_store = main_window.global::<ImportsStore>();
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        imports_store.set_can_import_files(true);
-        imports_store.on_import_file({
-            let (document, view, window) = (document.clone(), view.clone(), main_window.as_weak());
-            move || {
-                let Some(window) = window.upgrade() else { return };
-                // Modal to the main window, which can't be used meanwhile.
-                let dialog = rfd::FileDialog::new()
-                    .set_title("Import file")
-                    .add_filter("Monies import file", &["json"])
-                    .set_parent(&window.window().window_handle());
-                let Some(path) = dialog.pick_file() else { return };
-                let file_name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
-                match std::fs::read_to_string(&path) {
-                    Ok(text) => add_imports(&document, &view, &file_name, &text),
-                    Err(error) => view.show_error(&format!("Can't read ‘{file_name}’"), &error.to_string()),
-                }
+    imports_store.on_import_file({
+        let (document, view, window) = (document.clone(), view.clone(), main_window.as_weak());
+        move || {
+            let Some(window) = window.upgrade() else { return };
+            // Modal to the main window, which can't be used meanwhile.
+            let dialog = rfd::FileDialog::new()
+                .set_title("Import file")
+                .add_filter("Monies import file", &["json"])
+                .set_parent(&window.window().window_handle());
+            let Some(path) = dialog.pick_file() else { return };
+            let file_name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+            match std::fs::read_to_string(&path) {
+                Ok(text) => add_imports(&document, &view, &file_name, &text),
+                Err(error) => view.show_error(&format!("Can't read ‘{file_name}’"), &error.to_string()),
             }
-        });
-    }
+        }
+    });
 
     imports_store.on_discard_import({
         let (document, view) = (document.clone(), view.clone());
@@ -304,7 +290,6 @@ fn change_account<S: Store>(
 
 /// Adds the statements of the import file `file_name` as pending imports in one change, or
 /// shows why the file can't be imported.
-#[cfg_attr(target_arch = "wasm32", expect(dead_code, reason = "files can't be picked in the browser yet"))]
 fn add_imports<S: Store>(document: &RefCell<Document<S>>, view: &View, file_name: &str, text: &str) {
     // There may be a problem on every line; the dialog only has room for so many.
     const SHOWN_PROBLEMS: usize = 20;
@@ -323,10 +308,4 @@ fn add_imports<S: Store>(document: &RefCell<Document<S>>, view: &View, file_name
     }
     let change = change.build();
     perform(&mut document, view, change);
-}
-
-#[cfg(target_arch = "wasm32")]
-#[wasm_bindgen::prelude::wasm_bindgen(start)]
-pub fn start() -> Result<(), wasm_bindgen::JsValue> {
-    run().map_err(|error| wasm_bindgen::JsValue::from_str(&error.to_string()))
 }

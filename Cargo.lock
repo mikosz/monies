@@ -2707,7 +2707,6 @@ dependencies = [
  "slint",
  "slint-build",
  "uuid",
- "wasm-bindgen",
  "windows-sys 0.61.2",
 ]
 

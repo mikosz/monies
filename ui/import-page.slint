@@ -63,7 +63,7 @@ export component ImportPage inherits Page {
                         font-weight: 600;
                         vertical-alignment: center;
                     }
-                    if ImportsStore.can-import-files : Button {
+                    Button {
                         text: "Import file…";
                         enabled: !root.confirming;
                         clicked => {
@@ -75,8 +75,7 @@ export component ImportPage inherits Page {
             }
 
             if ImportsStore.imports.length == 0 : Text {
-                text: ImportsStore.can-import-files ? "No pending imports. Import a file of bank statements to review them here."
-                    : "No pending imports.";
+                text: "No pending imports. Import a file of bank statements to review them here.";
                 wrap: word-wrap;
             }
 

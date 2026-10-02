@@ -19,7 +19,6 @@ pub struct Ledger {
 }
 
 impl Ledger {
-    #[cfg_attr(target_arch = "wasm32", expect(dead_code, reason = "only used when loading from a database"))]
     pub fn new(
         accounts: Accounts,
         categories: Categories,

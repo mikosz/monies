@@ -4,8 +4,6 @@ import { PendingImport } from "import-line.slint";
 export global ImportsStore {
     // Pending imports of accounts that aren't deleted, in the order they were added.
     in property <[PendingImport]> imports;
-    // Whether import files can be picked, which the browser can't do yet.
-    in property <bool> can-import-files;
 
     // Asks for an import file and adds each of its statements as a pending import, or shows
     // why the file can't be imported.

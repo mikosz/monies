@@ -1,6 +1,5 @@
 use crate::change::Change;
 
-#[cfg(not(target_arch = "wasm32"))]
 pub mod sqlite;
 
 /// Persists changes to the ledger.
@@ -11,8 +10,8 @@ pub trait Store {
     fn apply(&mut self, change: &Change) -> Result<(), Self::Error>;
 }
 
-/// Stores nothing. Used where there's no database (the browser), for changes that are only
-/// staged in memory (see `DatabaseWriter`) and in tests.
+/// Stores nothing. Used for changes that are only staged in memory (see `DatabaseWriter`) and
+/// in tests.
 #[derive(Debug, Default)]
 pub struct MemoryStore;
 
