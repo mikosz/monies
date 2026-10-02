@@ -1,0 +1,212 @@
+import { Button, Palette } from "std-widgets.slint";
+import { ImportLine, PendingImport } from "import-line.slint";
+import { ImportsStore } from "imports-store.slint";
+import { Page } from "page.slint";
+
+export { ImportsStore, PendingImport }
+
+// Bank statements to import, from files in the format of docs/import-format.md. Each
+// statement waits here as a pending import until it's discarded, after confirmation, or
+// reviewed (a later step). The counts tell how its lines match the entries.
+export component ImportPage inherits Page {
+    title: "Import";
+    description: "";
+
+    // Lines and the header share these so the columns line up. The fixed columns are just wide
+    // enough for their contents (the date and time, the headers of the counts, the button), so
+    // the source gets as much of the line as possible.
+    property <length> column-spacing: 8px;
+    property <length> account-width: 130px;
+    property <length> source-width: 100px;
+    property <length> created-width: 104px;
+    property <length> count-width: 64px;
+    property <length> actions-width: 70px;
+    property <length> line-padding: 8px;
+
+    property <bool> confirming: ImportsStore.discarding-id != "";
+
+    // The import whose discarding awaits confirmation.
+    property <string> discarding-source;
+    property <string> discarding-account;
+
+    // Without input fields, the window's undo shortcuts need something focused.
+    init => { keys.focus(); }
+
+    function confirm-discard(import: PendingImport) {
+        root.discarding-source = import.source;
+        root.discarding-account = import.account;
+        ImportsStore.discarding-id = import.id;
+    }
+
+    function finish-confirmation() {
+        ImportsStore.discarding-id = "";
+        keys.focus();
+    }
+
+    keys := FocusScope {
+        // The list is short, so there's no scrolling.
+        VerticalLayout {
+            alignment: start;
+            spacing: 3px;
+
+            Rectangle {
+                opacity: root.confirming ? 0.4 : 1;
+
+                HorizontalLayout {
+                    padding-bottom: 6px;
+                    spacing: root.column-spacing;
+
+                    Text {
+                        horizontal-stretch: 1;
+                        text: "Pending imports";
+                        font-size: 16px;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                    }
+                    if ImportsStore.can-import-files : Button {
+                        text: "Import file…";
+                        enabled: !root.confirming;
+                        clicked => {
+                            ImportsStore.import-file();
+                            keys.focus();
+                        }
+                    }
+                }
+            }
+
+            if ImportsStore.imports.length == 0 : Text {
+                text: ImportsStore.can-import-files ? "No pending imports. Import a file of bank statements to review them here."
+                    : "No pending imports.";
+                wrap: word-wrap;
+            }
+
+            if ImportsStore.imports.length > 0 : Rectangle {
+                opacity: root.confirming ? 0.4 : 1;
+
+                HorizontalLayout {
+                    padding-left: root.line-padding;
+                    padding-right: root.line-padding;
+                    spacing: root.column-spacing;
+
+                    Text {
+                        width: root.account-width;
+                        text: "Account";
+                        font-weight: 700;
+                    }
+                    Text {
+                        horizontal-stretch: 1;
+                        min-width: root.source-width;
+                        preferred-width: root.source-width;
+                        text: "Source";
+                        font-weight: 700;
+                    }
+                    Text {
+                        width: root.created-width;
+                        text: "Added";
+                        font-weight: 700;
+                    }
+                    Text {
+                        width: root.count-width;
+                        text: "New";
+                        font-weight: 700;
+                        horizontal-alignment: right;
+                    }
+                    Text {
+                        width: root.count-width;
+                        text: "Duplicates";
+                        font-weight: 700;
+                        horizontal-alignment: right;
+                    }
+                    Text {
+                        width: root.count-width;
+                        text: "To review";
+                        font-weight: 700;
+                        horizontal-alignment: right;
+                    }
+                    Rectangle {
+                        width: root.actions-width;
+                    }
+                }
+            }
+
+            for row in ImportsStore.imports : ImportLine {
+                import: row;
+                dimmed: root.confirming;
+                column-spacing: root.column-spacing;
+                account-width: root.account-width;
+                source-width: root.source-width;
+                created-width: root.created-width;
+                count-width: root.count-width;
+                actions-width: root.actions-width;
+                horizontal-padding: root.line-padding;
+
+                Button {
+                    text: "Discard";
+                    enabled: !root.confirming;
+                    clicked => { root.confirm-discard(row); }
+                }
+            }
+        }
+
+        // Asks before discarding an import, like deleting an account permanently on the
+        // settings page.
+        if root.confirming : Rectangle {
+            x: 0;
+            y: 0;
+            width: parent.width;
+            height: parent.height;
+
+            TouchArea {}
+
+            Rectangle {
+                width: Math.min(420px, parent.width - 32px);
+                height: dialog.preferred-height;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 3;
+                background: Palette.background;
+                border-color: Palette.border;
+                border-width: 1px;
+                border-radius: 6px;
+                drop-shadow-blur: 12px;
+                drop-shadow-color: #00000060;
+
+                FocusScope {
+                    init => { self.focus(); }
+                    key-pressed(event) => {
+                        if (event.text == Key.Escape) {
+                            root.finish-confirmation();
+                            return accept;
+                        }
+                        return reject;
+                    }
+
+                    dialog := VerticalLayout {
+                        padding: 16px;
+                        spacing: 16px;
+
+                        Text {
+                            text: "Discard the import of ‘\{root.discarding-source}’ into ‘\{root.discarding-account}’?";
+                            wrap: word-wrap;
+                        }
+                        HorizontalLayout {
+                            alignment: end;
+                            spacing: 8px;
+
+                            Button {
+                                text: "Discard";
+                                clicked => {
+                                    ImportsStore.discard-import(ImportsStore.discarding-id);
+                                    root.finish-confirmation();
+                                }
+                            }
+                            Button {
+                                text: "Cancel";
+                                clicked => { root.finish-confirmation(); }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

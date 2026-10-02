@@ -55,6 +55,28 @@ impl Match {
     }
 }
 
+/// How many lines match how, e.g. to sum up a pending import.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MatchCounts {
+    pub new: usize,
+    pub duplicates: usize,
+    pub possible: usize,
+}
+
+impl MatchCounts {
+    pub fn of(matches: &[Match]) -> Self {
+        let mut counts = Self::default();
+        for found in matches {
+            match found {
+                Match::New => counts.new += 1,
+                Match::Duplicate(_) => counts.duplicates += 1,
+                Match::Possible(_) => counts.possible += 1,
+            }
+        }
+        counts
+    }
+}
+
 /// Matches statement lines to be imported into `account` with its entries, see the module
 /// documentation. Returns one match per line, in order.
 pub fn find_matches<'a>(
@@ -394,5 +416,13 @@ mod tests {
         assert_eq!(Match::Duplicate(entry).initial_status(), RowStatus::Skipped);
         assert_eq!(Match::Possible(entry).initial_status(), RowStatus::Pending);
         assert_eq!(Match::New.initial_status(), RowStatus::Pending);
+    }
+
+    #[test]
+    fn counts_matches_by_kind() {
+        let entry = EntryId::generate();
+        let matches = [Match::New, Match::Possible(entry), Match::New, Match::Duplicate(entry), Match::New];
+        assert_eq!(MatchCounts::of(&matches), MatchCounts { new: 3, duplicates: 1, possible: 1 });
+        assert_eq!(MatchCounts::of(&[]), MatchCounts::default());
     }
 }

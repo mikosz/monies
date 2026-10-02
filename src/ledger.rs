@@ -64,11 +64,16 @@ impl Ledger {
     }
 
     /// Pending imports, including those of deleted accounts, in the order they were created.
+    /// The app only shows [`Self::visible_imports`].
     pub fn imports(&self) -> impl Iterator<Item = (ImportId, &Import)> {
         self.imports.iter().map(|(&id, import)| (id, import))
     }
 
-    #[cfg_attr(not(test), expect(dead_code, reason = "used by the import UI, a later step"))]
+    /// Pending imports of accounts that aren't deleted, in the order they were created.
+    pub fn visible_imports(&self) -> impl Iterator<Item = (ImportId, &Import)> {
+        self.imports().filter(|(_, import)| self.accounts.get(import.account).is_some_and(|account| !account.deleted))
+    }
+
     pub fn import(&self, id: ImportId) -> Option<&Import> {
         self.imports.get(&id)
     }
@@ -355,5 +360,17 @@ mod tests {
 
         ledger.apply(&mut MemoryStore, &change.inverse()).unwrap();
         assert_eq!(imports(&ledger), all);
+    }
+
+    #[test]
+    fn hides_imports_of_deleted_accounts() {
+        let mut ledger = Ledger::default();
+        let (cash, bank) = (ledger.add_test_account("Cash"), ledger.add_test_account("Bank"));
+        add_import(&mut ledger, cash, &[("TRANSFER FLAT 12", "", "", RowStatus::Pending)]);
+        let shown = add_import(&mut ledger, bank, &[("CARD PAYMENT BAKERY 0007", "", "", RowStatus::Pending)]);
+
+        perform(&mut ledger, |builder| builder.delete_account(cash));
+        assert_eq!(ledger.visible_imports().map(|(id, _)| id).collect::<Vec<_>>(), [shown]);
+        assert_eq!(ledger.imports().count(), 2, "the imports are kept");
     }
 }

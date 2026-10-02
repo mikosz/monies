@@ -1,0 +1,39 @@
+{
+  "format": "monies-import",
+  "version": 1,
+  "statements": [
+    {
+      "account": "Gold bank",
+      "currency": "EUR",
+      "source": "gold-bank-statement-2026-08.pdf",
+      "lines": [
+        { "date": "2026-08-14", "amount": "-9.99", "text": "DIRECT DEBIT TUNEWAVE MUSIC SUBSCRIPTION",
+          "reference": "GB2608-0001", "name": "Music streaming", "category": "entertainment.streaming" },
+        { "date": "2026-08-17", "amount": "-64.90", "text": "CARD PAYMENT RAILWAYS ONLINE TICKETS",
+          "reference": "GB2608-0002", "name": "Train ticket", "category": "transport.train" },
+        { "date": "2026-08-18", "amount": "-38.50", "text": "CARD PAYMENT TRATTORIA DEL PORTO",
+          "reference": "GB2608-0003" },
+        { "date": "2026-08-18", "amount": "-100.00", "text": "ATM WITHDRAWAL HARBOUR SQUARE 12",
+          "reference": "GB2608-0004", "name": "Cash withdrawal", "category": "cash" },
+        { "date": "2026-08-19", "amount": "-486.00", "text": "CARD PAYMENT HOTEL SEASIDE VIEW",
+          "reference": "GB2608-0005", "name": "Hotel", "category": "travel.hotel" },
+        { "date": "2026-08-19", "amount": "-16.00", "text": "CARD PAYMENT CITY MUSEUM OF FICTION",
+          "reference": "GB2608-0006" },
+        { "date": "2026-08-21", "amount": "-52.40", "text": "CARD PAYMENT OSTERIA LUNA PIENA",
+          "reference": "GB2608-0007", "name": "Restaurant", "category": "food.restaurants" },
+        { "date": "2026-08-22", "amount": "-25.00", "text": "CARD PAYMENT PEDAL BIKE HIRE",
+          "reference": "GB2608-0008" },
+        { "date": "2026-08-23", "amount": "-44.90", "text": "CARD PAYMENT RISTORANTE IL FARO",
+          "reference": "GB2608-0009", "name": "Restaurant", "category": "food.restaurants" },
+        { "date": "2026-08-24", "amount": "-64.90", "text": "CARD PAYMENT RAILWAYS ONLINE TICKETS",
+          "reference": "GB2608-0010", "name": "Train ticket", "category": "transport.train" },
+        { "date": "2026-08-26", "amount": "-27.30", "text": "CARD PAYMENT PAGE TURNER BOOKSHOP 0118",
+          "reference": "GB2608-0011" },
+        { "date": "2026-08-27", "amount": "35.00", "text": "INCOMING TRANSFER J DOE HOLIDAY SHARE",
+          "reference": "GB2608-0012", "name": "Refund", "category": "income.refunds" },
+        { "date": "2026-08-31", "amount": "-3.50", "text": "ACCOUNT MAINTENANCE FEE 08/2026",
+          "reference": "GB2608-0013", "name": "Bank fee", "category": "bills.bank" }
+      ]
+    }
+  ]
+}

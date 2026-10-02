@@ -1,0 +1,103 @@
+import { Palette } from "std-widgets.slint";
+
+export struct PendingImport {
+    // The import's id, to refer back to it (e.g. when discarding it).
+    id: string,
+    // The account's name.
+    account: string,
+    // Where the lines come from, e.g. a statement's file name.
+    source: string,
+    // When the import was added: date and local time.
+    created: string,
+    // Numbers of lines that match no entry, certainly match one (an earlier import) and
+    // possibly match one, to be reviewed.
+    new: int,
+    duplicates: int,
+    possible: int,
+}
+
+// One pending import in the list, drawn as a card like the lines of accounts. Its children
+// (e.g. buttons for actions) are shown at the end of the line. Column sizes come from the page
+// so lines align with each other and the header.
+export component ImportLine inherits Rectangle {
+    in property <PendingImport> import;
+    in property <length> column-spacing;
+    in property <length> account-width;
+    // Minimum width of the source column, which takes the remaining space.
+    in property <length> source-width;
+    in property <length> created-width;
+    // Width of each of the columns of counts.
+    in property <length> count-width;
+    // Width of the children at the end of the line.
+    in property <length> actions-width;
+    // Space between the card's edge and its text; the header uses the same.
+    in property <length> horizontal-padding;
+    // Greyed out and not interactive, e.g. while a discard awaits confirmation.
+    in property <bool> dimmed;
+
+    // Same colours as account lines, see `AccountLine`.
+    property <color> tint: Palette.background.mix(Palette.foreground, 0.96);
+
+    background: touch.has-hover ? root.tint.mix(Palette.foreground, 0.92) : root.tint;
+    border-radius: 4px;
+    opacity: root.dimmed ? 0.4 : 1;
+    animate background, opacity { duration: 100ms; }
+
+    // Below the contents, so the children get their own clicks.
+    touch := TouchArea {
+        enabled: !root.dimmed;
+    }
+
+    HorizontalLayout {
+        padding-left: root.horizontal-padding;
+        padding-right: root.horizontal-padding;
+        padding-top: 3px;
+        padding-bottom: 3px;
+        spacing: root.column-spacing;
+
+        Text {
+            width: root.account-width;
+            text: root.import.account;
+            overflow: elide;
+            vertical-alignment: center;
+        }
+        Text {
+            horizontal-stretch: 1;
+            min-width: root.source-width;
+            preferred-width: root.source-width;
+            text: root.import.source;
+            overflow: elide;
+            vertical-alignment: center;
+        }
+        Text {
+            width: root.created-width;
+            text: root.import.created;
+            vertical-alignment: center;
+        }
+        Text {
+            width: root.count-width;
+            text: root.import.new;
+            horizontal-alignment: right;
+            vertical-alignment: center;
+        }
+        Text {
+            width: root.count-width;
+            text: root.import.duplicates;
+            horizontal-alignment: right;
+            vertical-alignment: center;
+        }
+        Text {
+            width: root.count-width;
+            text: root.import.possible;
+            horizontal-alignment: right;
+            vertical-alignment: center;
+        }
+        HorizontalLayout {
+            width: root.actions-width;
+            alignment: end;
+            spacing: 4px;
+
+            @children
+        }
+    }
+}

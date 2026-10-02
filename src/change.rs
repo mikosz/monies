@@ -229,7 +229,6 @@ impl<'a> ChangeBuilder<'a> {
 }
 
 /// Pending imports, reviewed row by row and then submitted or discarded.
-#[cfg_attr(not(test), expect(dead_code, reason = "used by the import UI, a later step"))]
 impl ChangeBuilder<'_> {
     /// Adds a pending import of statement lines into the account. Panics if there's no such
     /// account.
@@ -244,6 +243,7 @@ impl ChangeBuilder<'_> {
 
     /// Replaces the row at `position` of the import. Records nothing when the row doesn't
     /// change. Panics if there's no such import or row.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used by the import review, a later step"))]
     pub fn update_import_row(&mut self, id: ImportId, position: usize, row: ImportRow) {
         let current = &mut self.imports.get_mut(&id).expect("changed import exists").rows[position];
         if row != *current {
@@ -263,6 +263,7 @@ impl ChangeBuilder<'_> {
     /// their statement line and keep the line; missing categories are created. Returns the
     /// ids of the added entries. Records nothing when an accepted row has an empty name or no
     /// category. Panics if there's no such import.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used by the import review, a later step"))]
     pub fn submit_import(&mut self, id: ImportId) -> Result<Vec<EntryId>, ImportError> {
         let import = self.imports.get(&id).expect("submitted import exists");
         let account = import.account;

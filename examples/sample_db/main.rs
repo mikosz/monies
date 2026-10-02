@@ -10,6 +10,10 @@
 //! currency code. Each row of `entries.csv` is one entry, in the order they were entered: the
 //! account's name, an ISO date, a name, a category path and an amount in the account's
 //! currency (expenses positive, income negative). `--force` replaces an existing database.
+//!
+//! `import-gold-bank.json` is a statement of "Gold bank" for trying imports (see
+//! `docs/import-format.md`). It overlaps the holiday entries typed in, which are possible
+//! duplicates of some of its lines.
 
 use std::error::Error;
 use std::path::Path;

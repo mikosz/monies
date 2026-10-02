@@ -6,11 +6,11 @@ mod currency;
 mod database_writer;
 mod date_format;
 mod document;
-#[cfg_attr(not(test), expect(dead_code, reason = "used by the import UI, a later step"))]
 mod duplicates;
 mod entry;
 mod history;
 mod import;
+mod import_file;
 mod ledger;
 mod listing;
 mod store;
@@ -28,6 +28,7 @@ use currency::Currency;
 use date_format::DateFormat;
 use document::Document;
 use entry::{EntryId, ParsedEntry};
+use import::ImportId;
 use ledger::Ledger;
 use store::Store;
 use view::View;
@@ -203,6 +204,42 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         move |text| view.query_currencies(&text)
     });
 
+    let imports_store = main_window.global::<ImportsStore>();
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        imports_store.set_can_import_files(true);
+        imports_store.on_import_file({
+            let (document, view, window) = (document.clone(), view.clone(), main_window.as_weak());
+            move || {
+                let Some(window) = window.upgrade() else { return };
+                // Modal to the main window, which can't be used meanwhile.
+                let dialog = rfd::FileDialog::new()
+                    .set_title("Import file")
+                    .add_filter("Monies import file", &["json"])
+                    .set_parent(&window.window().window_handle());
+                let Some(path) = dialog.pick_file() else { return };
+                let file_name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+                match std::fs::read_to_string(&path) {
+                    Ok(text) => add_imports(&document, &view, &file_name, &text),
+                    Err(error) => view.show_error(&format!("Can't read ‘{file_name}’"), &error.to_string()),
+                }
+            }
+        });
+    }
+
+    imports_store.on_discard_import({
+        let (document, view) = (document.clone(), view.clone());
+        move |id| {
+            let Ok(id) = Uuid::parse_str(&id).map(ImportId) else { return };
+            let mut document = document.borrow_mut();
+            let Some(import) = document.ledger().import(id) else { return };
+            let mut change = ChangeBuilder::new(format!("Discard import ‘{}’", import.source), document.ledger());
+            change.discard_import(id);
+            let change = change.build();
+            perform(&mut document, &view, change);
+        }
+    });
+
     let undo_redo = main_window.global::<UndoRedo>();
     undo_redo.on_undo({
         let (document, view) = (document.clone(), view.clone());
@@ -261,6 +298,29 @@ fn change_account<S: Store>(
     let Some(account) = document.ledger().accounts().get(id) else { return };
     let mut change = ChangeBuilder::new(describe(&account.name), document.ledger());
     build(&mut change, id);
+    let change = change.build();
+    perform(&mut document, view, change);
+}
+
+/// Adds the statements of the import file `file_name` as pending imports in one change, or
+/// shows why the file can't be imported.
+#[cfg_attr(target_arch = "wasm32", expect(dead_code, reason = "files can't be picked in the browser yet"))]
+fn add_imports<S: Store>(document: &RefCell<Document<S>>, view: &View, file_name: &str, text: &str) {
+    // There may be a problem on every line; the dialog only has room for so many.
+    const SHOWN_PROBLEMS: usize = 20;
+
+    let mut document = document.borrow_mut();
+    let imports = match import_file::load(text, file_name, document.ledger()) {
+        Ok(imports) => imports,
+        Err(error) => {
+            view.show_error(&format!("Can't import ‘{file_name}’"), &error.summary(SHOWN_PROBLEMS));
+            return;
+        }
+    };
+    let mut change = ChangeBuilder::new(format!("Import ‘{file_name}’"), document.ledger());
+    for import in imports {
+        change.add_import(import.account, &import.source, import.rows);
+    }
     let change = change.build();
     perform(&mut document, view, change);
 }

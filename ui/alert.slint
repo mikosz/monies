@@ -1,0 +1,72 @@
+import { Button, Palette } from "std-widgets.slint";
+
+// A message for the user, e.g. why a file can't be imported, shown in a dialog over the whole
+// window while `message` isn't empty. Set from Rust; dismissing it clears `message`.
+export global Alert {
+    in-out property <string> title;
+    in-out property <string> message;
+
+    public function dismiss() {
+        self.message = "";
+    }
+}
+
+// The dialog showing `Alert`. Its keys (Escape and Enter dismiss it) are handled by the window,
+// which sees them first, so focus stays where it was and returns there once it's dismissed.
+// The backdrop covers the window and takes its clicks.
+export component AlertDialog inherits Rectangle {
+    background: #00000030;
+
+    TouchArea {}
+
+    Rectangle {
+        width: Math.min(480px, parent.width - 32px);
+        height: Math.min(dialog.preferred-height, parent.height - 32px);
+        x: (parent.width - self.width) / 2;
+        y: Math.max(16px, (parent.height - self.height) / 3);
+        background: Palette.background;
+        border-color: Palette.border;
+        border-width: 1px;
+        border-radius: 6px;
+        drop-shadow-blur: 12px;
+        drop-shadow-color: #00000060;
+        clip: true;
+
+        dialog := VerticalLayout {
+            padding: 16px;
+            spacing: 12px;
+
+            Text {
+                text: Alert.title;
+                font-size: 16px;
+                font-weight: 600;
+                wrap: word-wrap;
+            }
+            // In a small window, long messages are cut off rather than scrolled: callers keep
+            // them short enough. The button stays visible.
+            Rectangle {
+                vertical-stretch: 1;
+                min-height: 0px;
+                preferred-height: message.preferred-height;
+                clip: true;
+
+                message := Text {
+                    x: 0;
+                    y: 0;
+                    width: parent.width;
+                    text: Alert.message;
+                    wrap: word-wrap;
+                }
+            }
+            HorizontalLayout {
+                alignment: end;
+
+                Button {
+                    text: "OK";
+                    primary: true;
+                    clicked => { Alert.dismiss(); }
+                }
+            }
+        }
+    }
+}

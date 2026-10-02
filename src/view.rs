@@ -6,10 +6,13 @@ use slint::{ComponentHandle, Model, SharedString, VecModel};
 use crate::account::AccountId;
 use crate::currency::Currency;
 use crate::date_format::DateFormat;
+use crate::duplicates::{MatchCounts, find_matches};
 use crate::entry::{self, Entry, EntryId, format_amount};
 use crate::ledger::Ledger;
 use crate::listing::{ListItem, Splice, list_items, splice};
-use crate::{AccountRow, EntriesStore, EntryKind, EntryRow, MainWindow, RowType, SettingsStore};
+use crate::{
+    AccountRow, Alert, EntriesStore, EntryKind, EntryRow, ImportsStore, MainWindow, PendingImport, RowType, SettingsStore,
+};
 
 /// Mirrors the ledger into the UI.
 pub struct View {
@@ -33,6 +36,8 @@ pub struct View {
     accounts: Rc<VecModel<AccountRow>>,
     new_account_id: SharedString,
     currency_suggestions: Rc<VecModel<SharedString>>,
+    /// Pending imports of accounts that aren't deleted.
+    imports: Rc<VecModel<PendingImport>>,
 }
 
 impl View {
@@ -52,6 +57,7 @@ impl View {
             accounts: Rc::new(VecModel::default()),
             new_account_id: settings.get_new_account_id(),
             currency_suggestions: Rc::new(VecModel::default()),
+            imports: Rc::new(VecModel::default()),
         };
         store.set_date_placeholder(view.date_format.placeholder().into());
         store.set_entries(view.rows.clone().into());
@@ -59,6 +65,7 @@ impl View {
         store.set_account_suggestions(view.account_suggestions.clone().into());
         settings.set_accounts(view.accounts.clone().into());
         settings.set_currency_suggestions(view.currency_suggestions.clone().into());
+        window.global::<ImportsStore>().set_imports(view.imports.clone().into());
         view
     }
 
@@ -66,7 +73,8 @@ impl View {
         &self.date_format
     }
 
-    /// Shows the ledger's entries and accounts, updating only the rows that changed.
+    /// Shows the ledger's entries, accounts and pending imports, updating only the rows that
+    /// changed.
     pub fn show(&self, ledger: &Ledger) {
         let new_entry = EntryRow { id: self.new_entry_id.clone(), row_type: RowType::NewEntry, ..Default::default() };
         let rows: Vec<EntryRow> = list_items(ledger)
@@ -88,6 +96,7 @@ impl View {
         self.suggest_accounts(ledger);
         self.show_session_account(ledger);
         self.show_accounts(ledger);
+        self.show_imports(ledger);
     }
 
     /// Called after an entry was added to `account` (and shown): the inputs are cleared, and
@@ -114,6 +123,15 @@ impl View {
     pub fn query_currencies(&self, text: &str) {
         let suggestions = Currency::suggest(text).into_iter().map(SharedString::from);
         self.currency_suggestions.set_vec(suggestions.collect::<Vec<_>>());
+    }
+
+    /// Shows a message in a dialog over the window until the user dismisses it.
+    pub fn show_error(&self, title: &str, message: &str) {
+        if let Some(window) = self.window.upgrade() {
+            let alert = window.global::<Alert>();
+            alert.set_title(title.into());
+            alert.set_message(message.into());
+        }
     }
 
     fn entry_row(&self, id: EntryId, entry: &Entry, ledger: &Ledger) -> EntryRow {
@@ -195,6 +213,31 @@ impl View {
             let several = ledger.accounts().active().nth(1).is_some();
             window.global::<EntriesStore>().set_several_accounts(several);
         }
+    }
+
+    /// Shows the pending imports with how their lines match the entries now, which changes as
+    /// entries are added, edited or deleted.
+    fn show_imports(&self, ledger: &Ledger) {
+        let count = |count: usize| i32::try_from(count).unwrap_or(i32::MAX);
+        let rows: Vec<PendingImport> = ledger
+            .visible_imports()
+            .map(|(id, import)| {
+                let account = ledger.accounts().get(import.account).expect("imports refer to existing accounts");
+                let matches = find_matches(ledger, import.account, import.rows.iter().map(|row| &row.line));
+                let counts = MatchCounts::of(&matches);
+                let created = import.created.with_timezone(&chrono::Local);
+                PendingImport {
+                    id: id.0.to_string().into(),
+                    account: account.name.as_str().into(),
+                    source: import.source.as_str().into(),
+                    created: format!("{} {}", self.date_format.format(created.date_naive()), created.format("%H:%M")).into(),
+                    new: count(counts.new),
+                    duplicates: count(counts.duplicates),
+                    possible: count(counts.possible),
+                }
+            })
+            .collect();
+        update_model(&self.imports, rows);
     }
 }
 

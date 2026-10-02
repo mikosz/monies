@@ -1,9 +1,11 @@
 import { HorizontalBox } from "std-widgets.slint";
+import { Alert, AlertDialog } from "alert.slint";
 import { SideBar } from "side-bar.slint";
 import { EntriesPage, EntriesStore, EntryKind, EntryRow, RowType } from "entries-page.slint";
+import { ImportPage, ImportsStore, PendingImport } from "import-page.slint";
 import { AccountRow, SettingsPage, SettingsStore } from "settings-page.slint";
 
-export { AccountRow, EntriesStore, EntryKind, EntryRow, RowType, SettingsStore }
+export { AccountRow, Alert, EntriesStore, EntryKind, EntryRow, ImportsStore, PendingImport, RowType, SettingsStore }
 
 // Undo/redo of changes to the data (not of text being typed in a field).
 export global UndoRedo {
@@ -15,11 +17,12 @@ export component MainWindow inherits Window {
     title: "Monies!";
 
     // Index of the settings page in the side bar.
-    property <int> settings-page: 2;
-    // While an entry or account is edited, or a deletion awaits confirmation, undo/redo and
-    // switching pages are off.
+    property <int> settings-page: 3;
+    // While an entry or account is edited, a deletion awaits confirmation or an alert is shown,
+    // undo/redo and switching pages are off.
     property <bool> modal: EntriesStore.editing-id != "" || SettingsStore.editing-id != ""
-        || SettingsStore.deleting-id != "";
+        || SettingsStore.deleting-id != "" || ImportsStore.discarding-id != "" || root.alerting;
+    property <bool> alerting: Alert.message != "";
     property <bool> has-accounts: SettingsStore.has-accounts;
 
     // Without accounts the other pages are of no use: entries can't be added.
@@ -41,6 +44,13 @@ export component MainWindow inherits Window {
         focus-on-tab-navigation: false;
 
         capture-key-pressed(event) => {
+            // The alert takes all keys, so they don't reach the page below it.
+            if (root.alerting) {
+                if (event.text == Key.Escape || event.text == Key.Return) {
+                    Alert.dismiss();
+                }
+                return accept;
+            }
             // Undo/redo is off while editing; the fields then get the keys instead.
             if (event.modifiers.control && !event.modifiers.alt && !root.modal) {
                 if (event.text == "z" || event.text == "Z") {
@@ -62,14 +72,22 @@ export component MainWindow inherits Window {
         HorizontalLayout {
             side-bar := SideBar {
 //                title: "How do I hide this label?";
-                model: ["Entries", "Summary", "Settings"];
-                enabled-items: [root.has-accounts, root.has-accounts, true];
+                model: ["Entries", "Import", "Summary", "Settings"];
+                enabled-items: [root.has-accounts, root.has-accounts, root.has-accounts, true];
                 // Editing is modal: pages can't be switched meanwhile.
                 enabled: !root.modal;
             }
 
             if(side-bar.current-item == 0) : EntriesPage {}
+            if(side-bar.current-item == 1) : ImportPage {}
             if(side-bar.current-item == root.settings-page) : SettingsPage {}
+        }
+
+        if root.alerting : AlertDialog {
+            x: 0;
+            y: 0;
+            width: parent.width;
+            height: parent.height;
         }
     }
 }
