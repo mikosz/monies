@@ -141,7 +141,7 @@ mod tests {
     use super::*;
     use crate::change::ChangeBuilder;
     use crate::entry::ParsedEntry;
-    use crate::import::{ImportRow, RowStatus};
+    use crate::import::{ImportRow, LinkKind, RowStatus};
     use crate::store::MemoryStore;
 
     fn parsed(account: AccountId, category: &str, amount: &str) -> ParsedEntry {
@@ -215,7 +215,7 @@ mod tests {
         let (id, current) = ledger.entries()[0].clone();
 
         let mut builder = ChangeBuilder::new("Edit", &ledger);
-        builder.update_entry(id, &current, parsed(account, "bills.water", "-5"));
+        builder.update_entry(id, &current, parsed(account, "bills.water", "-5")).unwrap();
         let change = builder.build();
         ledger.apply(&mut MemoryStore, &change).unwrap();
 
@@ -234,7 +234,7 @@ mod tests {
         add(&mut ledger, cash, "food");
         let (id, current) = ledger.entries()[0].clone();
 
-        let change = perform(&mut ledger, |builder| builder.update_entry(id, &current, parsed(bank, "food", "1")));
+        let change = perform(&mut ledger, |builder| builder.update_entry(id, &current, parsed(bank, "food", "1")).unwrap());
         assert_eq!((ledger.entry_count(cash), ledger.entry_count(bank)), (0, 1));
         assert_eq!(ledger.entry(id).unwrap().account, bank);
 
@@ -327,7 +327,7 @@ mod tests {
             ("CARD PAYMENT CORNER SHOP 0042", "Groceries", "food.shop", RowStatus::Accepted),
             ("CARD PAYMENT BAKERY 0007", "Bread", "treats", RowStatus::Skipped),
             ("CARD PAYMENT CORNER SHOP 0043", "Snacks", "food.shop", RowStatus::Accepted),
-            ("TRANSFER FLAT 12", "", "", RowStatus::Pending),
+            ("TRANSFER FLAT 12", "", "", RowStatus::Skipped),
         ]);
         let pending = imports(&ledger);
 
@@ -344,6 +344,36 @@ mod tests {
         assert_eq!(paths(&ledger), ["bills"]);
         assert!(ledger.categories().suggest("food").is_empty(), "categories created by the submit are removed");
         assert_eq!(imports(&ledger), pending, "the import is back with its row statuses");
+    }
+
+    #[test]
+    fn submits_linked_rows_and_back() {
+        let mut ledger = Ledger::default();
+        let account = ledger.add_test_account("Cash");
+        let (_, kept) = add(&mut ledger, account, "food");
+        let (_, used) = add(&mut ledger, account, "food");
+        let entries = ledger.entries().to_vec();
+        let id = add_import(&mut ledger, account, &[
+            ("CARD PAYMENT CORNER SHOP 0042", "Groceries", "food.shop", RowStatus::Linked(kept, LinkKind::KeepEntry)),
+            ("CARD PAYMENT BAKERY 0007", "Bread", "food.bakery", RowStatus::Linked(used, LinkKind::UseImported)),
+        ]);
+        let pending = imports(&ledger);
+        let lines: Vec<_> = ledger.import(id).unwrap().rows.iter().map(|row| row.line.clone()).collect();
+
+        let change = perform(&mut ledger, |builder| {
+            builder.submit_import(id).unwrap();
+        });
+        assert_eq!(ledger.entry(kept), Some(&Entry { statement: Some(lines[0].clone()), ..entries[0].1.clone() }));
+        let updated = ledger.entry(used).unwrap();
+        assert_eq!((updated.name.as_str(), ledger.categories().path(updated.category)), ("Bread", "food.bakery".to_owned()));
+        assert_eq!((updated.date, updated.amount, updated.statement.as_ref()), (entries[1].1.date, 100, Some(&lines[1])));
+        assert_eq!(ledger.entries().len(), 2, "no entry is added");
+        assert_eq!(ledger.imports().count(), 0);
+
+        ledger.apply(&mut MemoryStore, &change.inverse()).unwrap();
+        assert_eq!(ledger.entries(), entries, "undo restores the entries");
+        assert!(ledger.categories().suggest("bakery").is_empty(), "and removes the category created");
+        assert_eq!(imports(&ledger), pending, "with the links");
     }
 
     #[test]

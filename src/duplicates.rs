@@ -45,12 +45,13 @@ pub enum Match {
 }
 
 impl Match {
-    /// The status the line's import row starts with: certain duplicates are skipped, the rest
-    /// left for the user to review.
+    /// The status the line's import row starts with: new lines are accepted and certain
+    /// duplicates skipped, while possible duplicates are left for the user to review.
     pub fn initial_status(&self) -> RowStatus {
         match self {
+            Match::New => RowStatus::Accepted,
             Match::Duplicate(_) => RowStatus::Skipped,
-            Match::Possible(_) | Match::New => RowStatus::Pending,
+            Match::Possible(_) => RowStatus::Pending,
         }
     }
 }
@@ -389,7 +390,7 @@ mod tests {
         let id = import(&mut ledger, account, [&shop])[0];
         let current = ledger.entry(id).unwrap().clone();
         let mut builder = ChangeBuilder::new("Edit", &ledger);
-        builder.update_entry(id, &current, ParsedEntry::test(account, "2026-09-20", "Weekly shop", "food", "99.00"));
+        builder.update_entry(id, &current, ParsedEntry::test(account, "2026-09-20", "Weekly shop", "food", "99.00")).unwrap();
         let change = builder.build();
         ledger.apply(&mut MemoryStore, &change).unwrap();
 
@@ -411,11 +412,11 @@ mod tests {
     }
 
     #[test]
-    fn only_certain_duplicates_start_skipped() {
+    fn only_possible_duplicates_start_pending() {
         let entry = EntryId::generate();
+        assert_eq!(Match::New.initial_status(), RowStatus::Accepted);
         assert_eq!(Match::Duplicate(entry).initial_status(), RowStatus::Skipped);
         assert_eq!(Match::Possible(entry).initial_status(), RowStatus::Pending);
-        assert_eq!(Match::New.initial_status(), RowStatus::Pending);
     }
 
     #[test]

@@ -104,9 +104,14 @@ impl Categories {
 
     /// Full path of the category, e.g. `dogs.health.pills`.
     pub fn path(&self, id: CategoryId) -> String {
-        let mut names: Vec<&str> = self.ancestors_and_self(id).map(|c| c.name.as_str()).collect();
+        self.category_path(id).to_string()
+    }
+
+    /// The path of the category, which [`Self::find`] finds it by.
+    pub fn category_path(&self, id: CategoryId) -> CategoryPath {
+        let mut names: Vec<String> = self.ancestors_and_self(id).map(|c| c.name.clone()).collect();
         names.reverse();
-        names.join(&SEPARATOR.to_string())
+        CategoryPath(names)
     }
 
     /// Suggests full category paths for a partially typed path.
@@ -270,6 +275,7 @@ mod tests {
         let categories = categories(&["Bills.Rent"]);
         let rent = categories.find(&path("BILLS.RENT")).unwrap();
         assert_eq!(categories.path(rent), "Bills.Rent");
+        assert_eq!(categories.category_path(rent), path("Bills.Rent"));
     }
 
     #[test]

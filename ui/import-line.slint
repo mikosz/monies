@@ -1,7 +1,7 @@
 import { Palette } from "std-widgets.slint";
 
 export struct PendingImport {
-    // The import's id, to refer back to it (e.g. when discarding it).
+    // The import's id, to refer back to it (e.g. when reviewing or discarding it).
     id: string,
     // The account's name.
     account: string,
@@ -34,18 +34,26 @@ export component ImportLine inherits Rectangle {
     in property <length> horizontal-padding;
     // Greyed out and not interactive, e.g. while a discard awaits confirmation.
     in property <bool> dimmed;
+    in property <bool> selected;
+
+    callback clicked();
+    callback double-clicked();
 
     // Same colours as account lines, see `AccountLine`.
     property <color> tint: Palette.background.mix(Palette.foreground, 0.96);
 
     background: touch.has-hover ? root.tint.mix(Palette.foreground, 0.92) : root.tint;
     border-radius: 4px;
+    border-width: root.selected ? 2px : 0px;
+    border-color: Palette.accent-background;
     opacity: root.dimmed ? 0.4 : 1;
     animate background, opacity { duration: 100ms; }
 
     // Below the contents, so the children get their own clicks.
     touch := TouchArea {
         enabled: !root.dimmed;
+        clicked => { root.clicked(); }
+        double-clicked => { root.double-clicked(); }
     }
 
     HorizontalLayout {

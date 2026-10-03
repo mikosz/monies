@@ -12,6 +12,7 @@ mod import;
 mod import_file;
 mod ledger;
 mod listing;
+mod review;
 mod store;
 mod view;
 
@@ -22,12 +23,14 @@ use std::rc::Rc;
 use uuid::Uuid;
 
 use account::AccountId;
+use category::CategoryPath;
 use change::{Change, ChangeBuilder};
 use currency::Currency;
 use date_format::DateFormat;
 use document::Document;
+use duplicates::Match;
 use entry::{EntryId, ParsedEntry};
-use import::ImportId;
+use import::{ImportId, ImportRow, LinkKind, RowStatus};
 use ledger::Ledger;
 use store::Store;
 use view::View;
@@ -105,7 +108,10 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                 return false;
             };
             let mut change = ChangeBuilder::new(format!("Edit entry ‘{}’", current.name), document.ledger());
-            change.update_entry(id, &current, parsed);
+            // Imported entries can't be moved to another account; the editor doesn't offer it.
+            if change.update_entry(id, &current, parsed).is_err() {
+                return false;
+            }
             let change = change.build();
             perform(&mut document, &view, change)
         }
@@ -226,6 +232,64 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         }
     });
 
+    imports_store.on_review_import({
+        let (document, view) = (document.clone(), view.clone());
+        // "" isn't an id, so it goes back to the list.
+        move |id| view.review(document.borrow().ledger(), Uuid::parse_str(&id).ok().map(ImportId))
+    });
+
+    imports_store.on_decide_row({
+        let (document, view) = (document.clone(), view.clone());
+        move |position, decision| {
+            let verb = match decision {
+                RowDecision::Accept => "Accept",
+                RowDecision::Skip => "Skip",
+                RowDecision::KeepEntry | RowDecision::UseImported => "Link",
+            };
+            let describe = |text: &str| format!("{verb} ‘{text}’");
+            update_reviewed_row(&document, &view, position, describe, |ledger, row, found| {
+                match decision {
+                    RowDecision::Accept => Some(ImportRow { status: RowStatus::Accepted, ..row.clone() }),
+                    RowDecision::Skip => Some(ImportRow { status: RowStatus::Skipped, ..row.clone() }),
+                    RowDecision::KeepEntry => review::link(ledger, row, found, LinkKind::KeepEntry),
+                    RowDecision::UseImported => review::link(ledger, row, found, LinkKind::UseImported),
+                }
+            });
+        }
+    });
+
+    imports_store.on_edit_row({
+        let (document, view) = (document.clone(), view.clone());
+        move |position, name, category| {
+            // Rows always have a name, see `ImportRow::name`.
+            let name = name.trim();
+            if name.is_empty() {
+                return false;
+            }
+            let describe = |text: &str| format!("Edit ‘{text}’");
+            update_reviewed_row(&document, &view, position, describe, |_, row, _| {
+                Some(ImportRow { name: name.to_owned(), category: CategoryPath::parse(&category), ..row.clone() })
+            });
+            true
+        }
+    });
+
+    imports_store.on_submit_review({
+        let (document, view) = (document.clone(), view.clone());
+        move || {
+            let Some(id) = view.reviewing() else { return };
+            let mut document = document.borrow_mut();
+            let Some(import) = document.ledger().import(id) else { return };
+            let mut change = ChangeBuilder::new(review::submit_description(document.ledger(), import), document.ledger());
+            if let Err(error) = change.submit_import(id) {
+                view.show_error(&format!("Can't submit ‘{}’", import.source), &error.to_string());
+                return;
+            }
+            let change = change.build();
+            perform(&mut document, &view, change);
+        }
+    });
+
     let undo_redo = main_window.global::<UndoRedo>();
     undo_redo.on_undo({
         let (document, view) = (document.clone(), view.clone());
@@ -284,6 +348,29 @@ fn change_account<S: Store>(
     let Some(account) = document.ledger().accounts().get(id) else { return };
     let mut change = ChangeBuilder::new(describe(&account.name), document.ledger());
     build(&mut change, id);
+    let change = change.build();
+    perform(&mut document, view, change);
+}
+
+/// Replaces the row at `position` of the import under review with what `update` makes of it
+/// with the ledger and the row's match, unless that's `None`. `describe` makes the change's
+/// description from the row's bank text.
+fn update_reviewed_row<S: Store>(
+    document: &RefCell<Document<S>>,
+    view: &View,
+    position: i32,
+    describe: impl FnOnce(&str) -> String,
+    update: impl FnOnce(&Ledger, &ImportRow, Match) -> Option<ImportRow>,
+) {
+    let (Some(id), Ok(position)) = (view.reviewing(), usize::try_from(position)) else { return };
+    let mut document = document.borrow_mut();
+    let ledger = document.ledger();
+    let Some(import) = ledger.import(id) else { return };
+    let Some(current) = import.rows.get(position) else { return };
+    let found = import.matches(ledger)[position];
+    let Some(row) = update(ledger, current, found) else { return };
+    let mut change = ChangeBuilder::new(describe(&current.line.text), ledger);
+    change.update_import_row(id, position, row);
     let change = change.build();
     perform(&mut document, view, change);
 }

@@ -8,13 +8,17 @@ import { SuggestionLineEdit } from "suggestion-line-edit.slint";
 // sizes come from the page so the fields align with the list.
 //
 // Enter submits, Escape cancels; what that means is up to the owner. Tab and Shift+Tab cycle
-// through the fields without leaving the editor. The date is prefilled with the last entered
-// date when focused while empty, and Up/Down move it by a day.
+// through the fields without leaving the editor, skipping a locked account. The date is
+// prefilled with the last entered date when focused while empty, and Up/Down move it by a day.
 export component EntryEditor {
     // Whether the account field is shown; without it, the only account is implied.
     in property <bool> show-account;
+    // Whether the account is shown but can't be changed: imported entries stay in their account.
+    in property <bool> account-locked;
     in property <length> column-spacing;
     in property <length> account-width;
+    // Width of the lines' icon column, left empty here.
+    in property <length> icon-width;
     in property <length> date-width;
     in property <length> amount-width;
     in property <length> flexible-width;
@@ -28,13 +32,14 @@ export component EntryEditor {
     callback submitted();
     callback cancelled();
 
+    property <bool> account-editable: root.show-account && !root.account-locked;
     // The field Tab cycles back to.
-    property <EntryColumn> first-column: root.show-account ? EntryColumn.account : EntryColumn.date;
+    property <EntryColumn> first-column: root.account-editable ? EntryColumn.account : EntryColumn.date;
 
     // Focuses the field of `column` and selects its text, so typing replaces it. The account
-    // column falls back to the date while hidden.
+    // column falls back to the date while hidden or locked.
     public function focus-column(column: EntryColumn) {
-        if (column == EntryColumn.account && root.show-account) {
+        if (column == EntryColumn.account && root.account-editable) {
             account-input.focus();
             account-input.select-all();
         } else if (column == EntryColumn.account || column == EntryColumn.date) {
@@ -91,12 +96,13 @@ export component EntryEditor {
     // Not part of the layout, so that it leaves no gap there while hidden; a placeholder in
     // the layout takes its place instead. Declared first to come first in the Tab order.
     account-input := SuggestionLineEdit {
-        x: 0;
+        // After the icon column.
+        x: root.icon-width + root.column-spacing;
         y: 0;
         width: root.account-width;
         height: root.height;
         visible: root.show-account;
-        enabled: root.show-account;
+        enabled: root.account-editable;
         placeholder-text: "Account";
         suggestions: EntriesStore.account-suggestions;
         edited(text) => { EntriesStore.account-edited(text); }
@@ -107,6 +113,9 @@ export component EntryEditor {
     HorizontalLayout {
         spacing: root.column-spacing;
 
+        Rectangle {
+            width: root.icon-width;
+        }
         if root.show-account : Rectangle {
             width: root.account-width;
         }

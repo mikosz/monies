@@ -1,4 +1,27 @@
 import { PendingImport } from "import-line.slint";
+import { ReviewRow, RowDecision } from "review-line.slint";
+
+// The pending import under review, see `ImportsStore.review`.
+export struct ReviewedImport {
+    // The import's id, "" when none is reviewed.
+    id: string,
+    // The account's name.
+    account: string,
+    source: string,
+    // Numbers of rows decided each way, and not yet.
+    to-add: int,
+    skipped: int,
+    linked: int,
+    to-review: int,
+    // Number of rows whose line is certainly in Monies already, which the counts above leave
+    // out, and the title of their section, e.g. "3 entries already in Monies".
+    duplicates: int,
+    duplicates-title: string,
+    // Label of the submit button, e.g. "Add 3 entries".
+    submit-label: string,
+    // Why the import can't be submitted yet, e.g. "Row 3 needs a category"; "" when it can.
+    submit-hint: string,
+}
 
 // Pending imports and the operations on them, implemented in Rust.
 export global ImportsStore {
@@ -14,4 +37,28 @@ export global ImportsStore {
     // Id of the import whose discarding awaits confirmation, or "" when none does. Everything
     // else is disabled meanwhile.
     in-out property <string> discarding-id;
+
+    // The import under review; its id is "" while the list of imports is shown. It's no
+    // longer reviewed once it's gone, e.g. submitted, discarded or its adding undone.
+    in property <ReviewedImport> review;
+    // The rows of the import under review: those whose line isn't certainly in Monies already,
+    // then those whose line is (see `ReviewRow.duplicate`), each in statement order. Empty when
+    // none is reviewed.
+    in property <[ReviewRow]> review-rows;
+    // Reviews the import with the id, or goes back to the list with "".
+    callback review-import(string);
+    // Decides about the row at the position (see `ReviewRow.position`) of the import under
+    // review. Linking links the row to the entry it may be, and is ignored unless that's an
+    // entry typed in; keeping the entry gives the row the entry's name and category.
+    callback decide-row(int, RowDecision);
+    // Arguments: position, name, category. Sets the proposed entry of the row of the import
+    // under review; an empty category is a missing one. Keeps the row's status.
+    // Returns false when the name is empty, which is refused.
+    callback edit-row(int, string, string) -> bool;
+    // Submits the import under review, or shows why it can't be submitted.
+    callback submit-review();
+
+    // Position (see `ReviewRow.position`) of the row of the import under review that's edited
+    // in place, or -1 when none is. Everything else is disabled meanwhile.
+    in-out property <int> editing-position: -1;
 }

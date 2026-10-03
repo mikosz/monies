@@ -5,8 +5,9 @@ use chrono::Utc;
 use crate::account::{Account, AccountError, AccountId, Accounts};
 use crate::category::{Categories, CategoryId, CategoryPath};
 use crate::currency::Currency;
-use crate::entry::{Entry, EntryId, ParsedEntry};
-use crate::import::{Import, ImportError, ImportId, ImportRow, RowStatus};
+use crate::duplicates::Match;
+use crate::entry::{Entry, EntryError, EntryId, ParsedEntry};
+use crate::import::{Import, ImportError, ImportId, ImportRow, LinkKind, RowStatus};
 use crate::ledger::Ledger;
 
 /// A primitive modification of the ledger. Every operation carries enough data to be
@@ -170,8 +171,12 @@ impl<'a> ChangeBuilder<'a> {
     /// Replaces the entry `id`, currently `current`, with the parsed input. Records nothing
     /// when the input doesn't change the entry. A different account moves the entry there;
     /// the amount is then taken as it is, in the other account's currency. An imported entry
-    /// keeps its statement line.
-    pub fn update_entry(&mut self, id: EntryId, current: &Entry, parsed: ParsedEntry) {
+    /// keeps its statement line, and so its account: the line is the bank's account's, and
+    /// later imports into that account recognise the entry by it.
+    pub fn update_entry(&mut self, id: EntryId, current: &Entry, parsed: ParsedEntry) -> Result<(), EntryError> {
+        if current.statement.is_some() && parsed.account != current.account {
+            return Err(EntryError::ImportedToOtherAccount);
+        }
         // An unchanged entry keeps its existing category, so no categories are created then.
         let category = self.category(&parsed.category);
         let after = Entry {
@@ -185,6 +190,7 @@ impl<'a> ChangeBuilder<'a> {
         if after != *current {
             self.ops.push(Op::UpdateEntry { id, before: current.clone(), after });
         }
+        Ok(())
     }
 
     pub fn build(self) -> Change {
@@ -243,7 +249,6 @@ impl ChangeBuilder<'_> {
 
     /// Replaces the row at `position` of the import. Records nothing when the row doesn't
     /// change. Panics if there's no such import or row.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used by the import review, a later step"))]
     pub fn update_import_row(&mut self, id: ImportId, position: usize, row: ImportRow) {
         let current = &mut self.imports.get_mut(&id).expect("changed import exists").rows[position];
         if row != *current {
@@ -258,37 +263,53 @@ impl ChangeBuilder<'_> {
         self.ops.push(Op::DeleteImport { id, import });
     }
 
-    /// Adds an entry to the import's account for every accepted row, in row order, and drops
-    /// the import with the rows that weren't accepted. Entries have the date and amount of
-    /// their statement line and keep the line; missing categories are created. Returns the
-    /// ids of the added entries. Records nothing when an accepted row has an empty name or no
-    /// category. Panics if there's no such import.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used by the import review, a later step"))]
+    /// Adds an entry to the import's account for every accepted row and gives the entry of
+    /// every linked row its statement line, in row order, and drops the import with its skipped
+    /// rows. Added entries have the date and amount of their statement line and keep the line.
+    /// Linked entries keep their own date and amount; those linked to use the imported data
+    /// take the row's name and category. Rows whose line is certainly in the ledger already
+    /// are dropped too, whatever their status. Missing categories are created. Returns the ids
+    /// of the added entries. Records nothing when the import can't be submitted, see
+    /// [`Import::check`]. Panics if there's no such import.
     pub fn submit_import(&mut self, id: ImportId) -> Result<Vec<EntryId>, ImportError> {
         let import = self.imports.get(&id).expect("submitted import exists");
-        let account = import.account;
-        let accepted = import
-            .rows
-            .iter()
-            .enumerate()
-            .filter(|(_, row)| row.status == RowStatus::Accepted)
-            .map(|(position, row)| {
-                let name = row.name.trim();
-                if name.is_empty() {
-                    return Err(ImportError::EmptyName { position });
-                }
-                let category = row.category.clone().ok_or(ImportError::MissingCategory { position })?;
-                Ok((name.to_owned(), category, row.line.clone()))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        import.check(self.ledger)?;
+        let (account, rows, matches) = (import.account, import.rows.clone(), import.matches(self.ledger));
 
-        let mut entries = Vec::with_capacity(accepted.len());
-        for (name, category, line) in accepted {
-            let category = self.category(&category);
-            let entry_id = EntryId::generate();
-            let entry = Entry { account, date: line.date, name, category, amount: line.amount, statement: Some(line) };
-            self.ops.push(Op::InsertEntry { id: entry_id, entry });
-            entries.push(entry_id);
+        let ledger = self.ledger;
+        let mut entries = Vec::new();
+        for (row, found) in rows.into_iter().zip(matches) {
+            // Matches are worked out from the current entries rather than stored, so a row may
+            // have become a certain duplicate after it was decided about, e.g. by submitting an
+            // overlapping import first. Adding it would add the transaction twice, and its entry
+            // has a statement line already, so it can't be linked either.
+            if let Match::Duplicate(_) = found {
+                continue;
+            }
+            match row.status {
+                RowStatus::Accepted => {
+                    let category = self.category(row.category.as_ref().expect("checked: accepted rows have a category"));
+                    let entry_id = EntryId::generate();
+                    let line = row.line;
+                    let name = row.name.trim().to_owned();
+                    let entry = Entry { account, date: line.date, name, category, amount: line.amount, statement: Some(line) };
+                    self.ops.push(Op::InsertEntry { id: entry_id, entry });
+                    entries.push(entry_id);
+                }
+                RowStatus::Linked(entry_id, LinkKind::KeepEntry) => {
+                    let before = ledger.entry(entry_id).expect("checked: linked entries exist").clone();
+                    let after = Entry { statement: Some(row.line), ..before.clone() };
+                    self.ops.push(Op::UpdateEntry { id: entry_id, before, after });
+                }
+                RowStatus::Linked(entry_id, LinkKind::UseImported) => {
+                    let category = self.category(row.category.as_ref().expect("checked: used rows have a category"));
+                    let before = ledger.entry(entry_id).expect("checked: linked entries exist").clone();
+                    let name = row.name.trim().to_owned();
+                    let after = Entry { name, category, statement: Some(row.line), ..before.clone() };
+                    self.ops.push(Op::UpdateEntry { id: entry_id, before, after });
+                }
+                RowStatus::Pending | RowStatus::Skipped => {}
+            }
         }
         self.discard_import(id);
         Ok(entries)
@@ -410,7 +431,7 @@ mod tests {
 
         let id = EntryId::generate();
         let mut builder = ChangeBuilder::new("Edit", &ledger);
-        builder.update_entry(id, &current, parsed(current.account, "bills.rent"));
+        builder.update_entry(id, &current, parsed(current.account, "bills.rent")).unwrap();
         let change = builder.build();
 
         assert_eq!(inserted_categories(&change), ["rent"]);
@@ -432,7 +453,7 @@ mod tests {
 
         let (id, other) = (EntryId::generate(), AccountId::generate());
         let mut builder = ChangeBuilder::new("Edit", &ledger);
-        builder.update_entry(id, &current, parsed(other, "bills"));
+        builder.update_entry(id, &current, parsed(other, "bills")).unwrap();
         let change = builder.build();
 
         let after = Entry { account: other, ..current.clone() };
@@ -447,7 +468,7 @@ mod tests {
         let ledger = ledger_with(categories);
 
         let mut builder = ChangeBuilder::new("Edit", &ledger);
-        builder.update_entry(EntryId::generate(), &current, parsed(current.account, "BILLS"));
+        builder.update_entry(EntryId::generate(), &current, parsed(current.account, "BILLS")).unwrap();
         assert!(builder.build().is_empty());
     }
 
@@ -617,7 +638,7 @@ mod tests {
         let (mut ledger, _, bank) = ledger_with_accounts();
         let rows = vec![
             row("CARD PAYMENT CORNER SHOP 0042", " Groceries ", "food.shop", RowStatus::Accepted),
-            row("CARD PAYMENT BAKERY 0007", "Bread", "food.bakery", RowStatus::Pending),
+            row("CARD PAYMENT BAKERY 0007", "Bread", "food.bakery", RowStatus::Skipped),
             row("TRANSFER FLAT 12", "Rent", "BILLS", RowStatus::Accepted),
             row("CARD PAYMENT CORNER SHOP 0043", "Snacks", "Food.Shop", RowStatus::Accepted),
             row("CARD PAYMENT CORNER SHOP 0042", "Groceries", "food.shop", RowStatus::Skipped),
@@ -651,8 +672,9 @@ mod tests {
     #[test]
     fn submit_refuses_accepted_rows_without_name_or_category() {
         let (mut ledger, cash, _) = ledger_with_accounts();
+        let typed_in = ledger.entries()[0].0;
         let unnamed = add_import(&mut ledger, cash, vec![
-            row("CARD PAYMENT CORNER SHOP 0042", "", "", RowStatus::Pending),
+            row("CARD PAYMENT CORNER SHOP 0042", "", "", RowStatus::Skipped),
             row("CARD PAYMENT BAKERY 0007", "Bread", "food", RowStatus::Accepted),
             row("TRANSFER FLAT 12", "  ", "bills", RowStatus::Accepted),
         ]);
@@ -660,12 +682,222 @@ mod tests {
             row("CARD PAYMENT CORNER SHOP 0042", "Groceries", "", RowStatus::Skipped),
             row("CARD PAYMENT BAKERY 0007", "Bread", "", RowStatus::Accepted),
         ]);
+        let mut linked =
+            |kind| add_import(&mut ledger, cash, vec![row("TRANSFER FLAT 12", "Rent", "", RowStatus::Linked(typed_in, kind))]);
+        let (kept, used) = (linked(LinkKind::KeepEntry), linked(LinkKind::UseImported));
 
         let mut builder = ChangeBuilder::new("Submit", &ledger);
         assert_eq!(builder.submit_import(unnamed), Err(ImportError::EmptyName { position: 2 }));
         assert_eq!(builder.submit_import(uncategorised), Err(ImportError::MissingCategory { position: 1 }));
+        assert_eq!(builder.submit_import(used), Err(ImportError::MissingCategory { position: 0 }), "its data is used");
         assert!(builder.build().is_empty(), "no categories are created either");
         assert_eq!(ImportError::EmptyName { position: 2 }.to_string(), "row 3: name must not be empty");
+
+        let mut builder = ChangeBuilder::new("Submit", &ledger);
+        assert!(builder.submit_import(kept).is_ok(), "only the statement line is used");
+    }
+
+    #[test]
+    fn submit_refuses_rows_still_to_review_first() {
+        let (mut ledger, cash, _) = ledger_with_accounts();
+        let id = add_import(&mut ledger, cash, vec![
+            row("TRANSFER FLAT 12", "", "bills", RowStatus::Accepted),
+            row("CARD PAYMENT BAKERY 0007", "", "", RowStatus::Skipped),
+            row("CARD PAYMENT CORNER SHOP 0042", "", "", RowStatus::Pending),
+        ]);
+
+        let mut builder = ChangeBuilder::new("Submit", &ledger);
+        assert_eq!(builder.submit_import(id), Err(ImportError::Undecided { position: 2 }), "before the missing name");
+        assert!(builder.build().is_empty());
+        assert_eq!(ImportError::Undecided { position: 2 }.to_string(), "row 3 hasn't been reviewed");
+    }
+
+    /// Adds an entry typed in to `account` and returns its id.
+    fn add_entry(ledger: &mut Ledger, account: AccountId) -> EntryId {
+        let mut builder = ChangeBuilder::new("Add", ledger);
+        let id = builder.add_entry(parsed(account, "food"));
+        let change = builder.build();
+        ledger.apply(&mut MemoryStore, &change).unwrap();
+        id
+    }
+
+    #[test]
+    fn submit_gives_linked_entries_their_statement_lines() {
+        let (mut ledger, _, bank) = ledger_with_accounts();
+        let entry_id = add_entry(&mut ledger, bank);
+        let id = add_import(&mut ledger, bank, vec![
+            row("CARD PAYMENT CORNER SHOP 0042", "Groceries", "food.shop", RowStatus::Accepted),
+            row("CARD PAYMENT BAKERY 0007", "Bread", "treats", RowStatus::Linked(entry_id, LinkKind::KeepEntry)),
+        ]);
+        let line = ledger.import(id).unwrap().rows[1].line.clone();
+        let before = ledger.entry(entry_id).unwrap().clone();
+
+        let mut builder = ChangeBuilder::new("Submit", &ledger);
+        let added = builder.submit_import(id).unwrap();
+        let change = builder.build();
+
+        assert_eq!(added.len(), 1, "linked rows add no entries");
+        assert_eq!(inserted_categories(&change), ["shop"], "only for the added entry");
+        let after = Entry { statement: Some(line), ..before.clone() };
+        let [.., Op::InsertEntry { .. }, update, Op::DeleteImport { .. }] = change.ops.as_slice() else {
+            panic!("unexpected ops: {:?}", change.ops)
+        };
+        assert_eq!(
+            *update,
+            Op::UpdateEntry { id: entry_id, before, after },
+            "the entry keeps its name, category, date and amount"
+        );
+    }
+
+    #[test]
+    fn submit_gives_entries_linked_to_use_the_imported_data_the_rows_name_and_category() {
+        let (mut ledger, _, bank) = ledger_with_accounts();
+        let entry_id = add_entry(&mut ledger, bank);
+        // The entry is "Rent" of 1.00 on 2026-09-30.
+        let status = RowStatus::Linked(entry_id, LinkKind::UseImported);
+        let id = add_import(&mut ledger, bank, vec![ImportRow::test(
+            "2026-09-28",
+            1250,
+            "CARD PAYMENT BAKERY 0007",
+            " Bread ",
+            "food.bakery",
+            status,
+        )]);
+        let line = ledger.import(id).unwrap().rows[0].line.clone();
+        let before = ledger.entry(entry_id).unwrap().clone();
+
+        let mut builder = ChangeBuilder::new("Submit", &ledger);
+        assert_eq!(builder.submit_import(id), Ok(vec![]));
+        let change = builder.build();
+
+        assert_eq!(inserted_categories(&change), ["bakery"], "the existing food reused");
+        let [Op::InsertCategory { id: bakery, .. }, Op::UpdateEntry { id: updated, before: old, after }, Op::DeleteImport { .. }] =
+            change.ops.as_slice()
+        else {
+            panic!("unexpected ops: {:?}", change.ops)
+        };
+        assert_eq!((*updated, old), (entry_id, &before));
+        let expected = Entry { name: "Bread".to_owned(), category: *bakery, statement: Some(line), ..before.clone() };
+        assert_eq!(*after, expected, "the entry keeps its date and amount, the name is trimmed");
+    }
+
+    #[test]
+    fn submit_refuses_invalid_links() {
+        let (mut ledger, cash, bank) = ledger_with_accounts();
+        let typed_in = ledger.entries()[0].0;
+        let in_other_account = add_entry(&mut ledger, bank);
+        let source = add_import(&mut ledger, cash, vec![row("TRANSFER FLAT 12", "Rent", "bills", RowStatus::Accepted)]);
+        let mut builder = ChangeBuilder::new("Submit", &ledger);
+        let imported = builder.submit_import(source).unwrap()[0];
+        let change = builder.build();
+        ledger.apply(&mut MemoryStore, &change).unwrap();
+
+        let linked = |entry| row("CARD PAYMENT CORNER SHOP 0042", "", "", RowStatus::Linked(entry, LinkKind::KeepEntry));
+        let missing = add_import(&mut ledger, cash, vec![linked(EntryId::generate())]);
+        let moved = add_import(&mut ledger, cash, vec![linked(in_other_account)]);
+        let already = add_import(&mut ledger, cash, vec![linked(imported)]);
+        let skipped = row("CARD PAYMENT BAKERY 0007", "", "", RowStatus::Skipped);
+        let twice = add_import(&mut ledger, cash, vec![linked(typed_in), skipped, linked(typed_in)]);
+
+        let mut builder = ChangeBuilder::new("Submit", &ledger);
+        assert_eq!(builder.submit_import(missing), Err(ImportError::LinkedEntryMissing { position: 0 }));
+        assert_eq!(builder.submit_import(moved), Err(ImportError::LinkedEntryMissing { position: 0 }), "another account's");
+        assert_eq!(builder.submit_import(already), Err(ImportError::AlreadyLinked { position: 0 }));
+        assert_eq!(builder.submit_import(twice), Err(ImportError::LinkedTwice { position: 2, first: 0 }));
+        assert!(builder.build().is_empty());
+        assert_eq!(
+            ImportError::LinkedTwice { position: 2, first: 0 }.to_string(),
+            "row 3: the linked entry is linked by row 1 too"
+        );
+    }
+
+    /// Submits the import and applies the change; returns the ids of the added entries.
+    fn submit(ledger: &mut Ledger, id: ImportId) -> Vec<EntryId> {
+        let mut builder = ChangeBuilder::new("Submit", ledger);
+        let entries = builder.submit_import(id).unwrap();
+        let change = builder.build();
+        ledger.apply(&mut MemoryStore, &change).unwrap();
+        entries
+    }
+
+    /// The names of the entries inserted by the change.
+    fn inserted_names(change: &Change) -> Vec<&str> {
+        change
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::InsertEntry { entry, .. } => Some(entry.name.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn submit_leaves_out_certain_duplicates_whatever_their_status() {
+        let (mut ledger, _, bank) = ledger_with_accounts();
+        let source = add_import(&mut ledger, bank, vec![
+            row("TRANSFER FLAT 12", "Rent", "bills", RowStatus::Accepted),
+            row("CARD PAYMENT BAKERY 0007", "Bread", "food", RowStatus::Accepted),
+        ]);
+        submit(&mut ledger, source);
+
+        let id = add_import(&mut ledger, bank, vec![
+            row("TRANSFER FLAT 12", "", "", RowStatus::Pending),
+            row("CARD PAYMENT BAKERY 0007", "Bread", "food", RowStatus::Accepted),
+            row("BANK FEE", "Fee", "bills", RowStatus::Accepted),
+        ]);
+        assert_eq!(ledger.import(id).unwrap().check(&ledger), Ok(()), "an incomplete duplicate to review doesn't matter");
+        let mut builder = ChangeBuilder::new("Submit", &ledger);
+        assert_eq!(builder.submit_import(id).unwrap().len(), 1);
+        assert_eq!(inserted_names(&builder.build()), ["Fee"]);
+    }
+
+    #[test]
+    fn submit_leaves_out_rows_that_became_duplicates_by_an_overlapping_import() {
+        let (mut ledger, _, bank) = ledger_with_accounts();
+        let first = add_import(&mut ledger, bank, vec![
+            row("CARD PAYMENT CORNER SHOP 0042", "Groceries", "food", RowStatus::Accepted),
+            row("CARD PAYMENT BAKERY 0007", "Bread", "food", RowStatus::Accepted),
+        ]);
+        let overlapping = add_import(&mut ledger, bank, vec![
+            row("CARD PAYMENT BAKERY 0007", "Bread", "food", RowStatus::Accepted),
+            row("BANK FEE", "Fee", "bills", RowStatus::Accepted),
+        ]);
+        submit(&mut ledger, first);
+
+        let mut builder = ChangeBuilder::new("Submit", &ledger);
+        assert_eq!(builder.submit_import(overlapping).unwrap().len(), 1, "the bakery's line was imported meanwhile");
+        assert_eq!(inserted_names(&builder.build()), ["Fee"]);
+    }
+
+    #[test]
+    fn submit_refuses_references_of_entries_of_the_account() {
+        let (mut ledger, cash, bank) = ledger_with_accounts();
+        let referenced = |text| {
+            let mut referenced = row(text, "Rent", "bills", RowStatus::Accepted);
+            referenced.line.reference = Some("TX-0001".to_owned());
+            referenced
+        };
+        let source = add_import(&mut ledger, bank, vec![referenced("TRANSFER FLAT 12")]);
+        submit(&mut ledger, source);
+
+        // The first row is a certain duplicate of the entry, which leaves the second none to
+        // match: it would be added with the entry's reference.
+        let rows = vec![referenced("TRANSFER FLAT 12"), referenced("TRANSFER FLAT 13")];
+        let id = add_import(&mut ledger, bank, rows.clone());
+        let mut builder = ChangeBuilder::new("Submit", &ledger);
+        assert_eq!(builder.submit_import(id), Err(ImportError::ReferenceInUse { position: 1 }));
+        assert!(builder.build().is_empty());
+        assert_eq!(
+            ImportError::ReferenceInUse { position: 1 }.to_string(),
+            "row 2: an entry of the account has the same reference"
+        );
+
+        let skipped = ImportRow { status: RowStatus::Skipped, ..rows[1].clone() };
+        let id = add_import(&mut ledger, bank, vec![rows[0].clone(), skipped]);
+        assert!(ChangeBuilder::new("Submit", &ledger).submit_import(id).is_ok(), "only rows entered count");
+        let id = add_import(&mut ledger, cash, rows);
+        assert!(ChangeBuilder::new("Submit", &ledger).submit_import(id).is_ok(), "in another account");
     }
 
     #[test]
@@ -703,8 +935,8 @@ mod tests {
 
         let id = EntryId::generate();
         let mut builder = ChangeBuilder::new("Edit", &ledger);
-        builder.update_entry(id, &current, ParsedEntry::test(current.account, "2026-09-30", "Rent", "bills", "1"));
-        builder.update_entry(id, &current, ParsedEntry::test(current.account, "2026-10-01", "Flat", "bills", "2"));
+        builder.update_entry(id, &current, ParsedEntry::test(current.account, "2026-09-30", "Rent", "bills", "1")).unwrap();
+        builder.update_entry(id, &current, ParsedEntry::test(current.account, "2026-10-01", "Flat", "bills", "2")).unwrap();
         let change = builder.build();
 
         let [Op::UpdateEntry { after, .. }] = change.ops.as_slice() else {
@@ -712,6 +944,27 @@ mod tests {
         };
         assert_eq!((after.name.as_str(), after.amount), ("Flat", 200));
         assert_eq!(after.statement, current.statement);
+    }
+
+    #[test]
+    fn imported_entries_stay_in_their_account() {
+        let mut categories = Categories::default();
+        categories.insert(CategoryId::generate(), "bills".to_owned(), None);
+        let line = row("TRANSFER FLAT 12", "Rent", "bills", RowStatus::Accepted).line;
+        let current = Entry { statement: Some(line), ..entry(&categories, "bills", 100) };
+        let ledger = ledger_with(categories);
+
+        let (id, other) = (EntryId::generate(), AccountId::generate());
+        let mut builder = ChangeBuilder::new("Edit", &ledger);
+        let moved = ParsedEntry::test(other, "2026-09-30", "Rent", "bills", "1");
+        assert_eq!(builder.update_entry(id, &current, moved), Err(EntryError::ImportedToOtherAccount));
+        assert!(builder.build().is_empty());
+        assert_eq!(EntryError::ImportedToOtherAccount.to_string(), "an imported entry can't be moved to another account");
+
+        let mut builder = ChangeBuilder::new("Edit", &ledger);
+        let edited = ParsedEntry::test(current.account, "2026-10-01", "Flat", "bills", "2");
+        assert_eq!(builder.update_entry(id, &current, edited), Ok(()), "other fields can change");
+        assert_eq!(builder.build().ops.len(), 1);
     }
 
     #[test]

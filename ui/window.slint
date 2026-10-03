@@ -2,10 +2,15 @@ import { HorizontalBox } from "std-widgets.slint";
 import { Alert, AlertDialog } from "alert.slint";
 import { SideBar } from "side-bar.slint";
 import { EntriesPage, EntriesStore, EntryKind, EntryRow, RowType } from "entries-page.slint";
-import { ImportPage, ImportsStore, PendingImport } from "import-page.slint";
+import {
+    ImportPage, ImportsStore, PendingImport, ReviewedImport, ReviewEntry, ReviewRow, ReviewStatus, RowDecision
+} from "import-page.slint";
 import { AccountRow, SettingsPage, SettingsStore } from "settings-page.slint";
 
-export { AccountRow, Alert, EntriesStore, EntryKind, EntryRow, ImportsStore, PendingImport, RowType, SettingsStore }
+export {
+    AccountRow, Alert, EntriesStore, EntryKind, EntryRow, ImportsStore, PendingImport, ReviewedImport, ReviewEntry,
+    ReviewRow, ReviewStatus, RowDecision, RowType, SettingsStore
+}
 
 // Undo/redo of changes to the data (not of text being typed in a field).
 export global UndoRedo {
@@ -18,10 +23,11 @@ export component MainWindow inherits Window {
 
     // Index of the settings page in the side bar.
     property <int> settings-page: 3;
-    // While an entry or account is edited, a deletion awaits confirmation or an alert is shown,
-    // undo/redo and switching pages are off.
+    // While an entry, account or import row is edited, a deletion awaits confirmation or an
+    // alert is shown, undo/redo and switching pages are off.
     property <bool> modal: EntriesStore.editing-id != "" || SettingsStore.editing-id != ""
-        || SettingsStore.deleting-id != "" || ImportsStore.discarding-id != "" || root.alerting;
+        || SettingsStore.deleting-id != "" || ImportsStore.discarding-id != "" || ImportsStore.editing-position >= 0
+        || root.alerting;
     property <bool> alerting: Alert.message != "";
     property <bool> has-accounts: SettingsStore.has-accounts;
 

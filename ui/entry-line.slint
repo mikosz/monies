@@ -29,16 +29,61 @@ export struct EntryRow {
     // With the currency's symbol, e.g. "€12.50", to show.
     amount-display: string,
     kind: EntryKind,
+    // Whether the entry was imported from a statement rather than typed in. Imported entries
+    // stay in their account.
+    imported: bool,
+    // Every other entry of a month, which is shaded a little differently.
+    odd: bool,
 }
 
-// One entry in the list, drawn as a card tinted by its kind that highlights on hover.
-// Column sizes come from the page so lines align with the header and the input row.
+// Colours of lines of entries and of import rows. They mix the theme's colours, so they suit
+// light and dark themes alike.
+export global LineColors {
+    // Backgrounds of lines, alternating so that neighbours are told apart.
+    out property <color> background: Palette.background.mix(Palette.foreground, 0.96);
+    out property <color> alternate-background: Palette.background.mix(Palette.foreground, 0.92);
+    // Readable on the backgrounds, also when tinted.
+    out property <color> expense: Palette.color-scheme == ColorScheme.dark ? #ef5350 : #c62828;
+    out property <color> income: Palette.color-scheme == ColorScheme.dark ? #66bb6a : #2e7d32;
+
+    // The background of a line, `odd` telling which of the alternating ones.
+    public pure function line-background(odd: bool) -> color {
+        return odd ? root.alternate-background : root.background;
+    }
+
+    // Hovering mixes in a bit of the text colour: darker on light themes, lighter on dark ones.
+    public pure function hovered(background: color) -> color {
+        return background.mix(Palette.foreground, 0.92);
+    }
+
+    // Amounts are red for expenses and green for income.
+    public pure function amount(kind: EntryKind) -> color {
+        return kind == EntryKind.expense ? root.expense : kind == EntryKind.income ? root.income : Palette.foreground;
+    }
+}
+
+// A small icon marking an entry typed in, a pen over a sheet of paper. Imported entries have
+// none, being what's expected once statements are imported.
+export component TypedInIcon inherits Image {
+    source: @image-url("icons/typed-in.svg");
+    colorize: Palette.foreground;
+    image-fit: contain;
+    opacity: 0.7;
+    accessible-role: image;
+    accessible-label: "Typed in";
+}
+
+// One entry in the list, drawn as a card that highlights on hover, starting with an icon if it
+// was typed in and with its amount coloured by its kind. Column sizes come from the page so
+// lines align with the header and the input row.
 export component EntryLine inherits Rectangle {
     in property <EntryRow> entry;
     // Whether the account column is shown; it's left out when there's only one account.
     in property <bool> show-account;
     in property <length> column-spacing;
     in property <length> account-width;
+    // Width of the column with the icon of entries typed in.
+    in property <length> icon-width;
     in property <length> date-width;
     in property <length> amount-width;
     // Minimum width of the name and category columns, which share the remaining space.
@@ -51,18 +96,9 @@ export component EntryLine inherits Rectangle {
     // With the column under the pointer.
     callback double-clicked(EntryColumn);
 
-    // Colours mix the theme's background with a hint of colour, so they suit light and dark
-    // themes alike. Hovering mixes in a bit of the text colour: darker on light themes,
-    // lighter on dark ones.
-    property <color> expense-tint: Palette.background.mix(#e53935, 0.92);
-    property <color> income-tint: Palette.background.mix(#43a047, 0.92);
-    property <color> neutral-tint: Palette.background.mix(Palette.foreground, 0.96);
-    property <color> tint: root.dimmed ? root.neutral-tint
-        : root.entry.kind == EntryKind.expense ? root.expense-tint
-        : root.entry.kind == EntryKind.income ? root.income-tint
-        : root.neutral-tint;
+    property <color> tint: LineColors.line-background(root.entry.odd);
 
-    background: touch.has-hover ? root.tint.mix(Palette.foreground, 0.92) : root.tint;
+    background: touch.has-hover ? LineColors.hovered(root.tint) : root.tint;
     border-radius: 4px;
     opacity: root.dimmed ? 0.4 : 1;
     animate background, opacity { duration: 100ms; }
@@ -74,6 +110,11 @@ export component EntryLine inherits Rectangle {
         padding-bottom: 6px;
         spacing: root.column-spacing;
 
+        // Hidden rather than left out, so the columns stay aligned.
+        TypedInIcon {
+            width: root.icon-width;
+            visible: !root.entry.imported;
+        }
         if root.show-account : Text {
             width: root.account-width;
             text: root.entry.account;
@@ -100,6 +141,7 @@ export component EntryLine inherits Rectangle {
         amount := Text {
             width: root.amount-width;
             text: root.entry.amount-display;
+            color: LineColors.amount(root.entry.kind);
             horizontal-alignment: right;
         }
     }
@@ -109,7 +151,7 @@ export component EntryLine inherits Rectangle {
         enabled: !root.dimmed;
         double-clicked => {
             // Columns start where their text starts; the spacing before one counts to the
-            // previous column.
+            // previous column, and the icon to the first.
             root.double-clicked(
                 root.show-account && self.mouse-x < date.x ? EntryColumn.account
                 : self.mouse-x < name.x ? EntryColumn.date

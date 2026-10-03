@@ -42,7 +42,14 @@ pub enum EntryKind {
 
 impl Entry {
     pub fn kind(&self) -> EntryKind {
-        match self.amount.cmp(&0) {
+        EntryKind::of(self.amount)
+    }
+}
+
+impl EntryKind {
+    /// The kind of an amount, positive for expenses as for entries.
+    pub fn of(amount: i64) -> Self {
+        match amount.cmp(&0) {
             std::cmp::Ordering::Greater => EntryKind::Expense,
             std::cmp::Ordering::Less => EntryKind::Income,
             std::cmp::Ordering::Equal => EntryKind::Neutral,
@@ -70,6 +77,9 @@ pub enum EntryError {
     EmptyName,
     EmptyCategory,
     InvalidAmount,
+    /// An imported entry can't be moved to another account: its statement line is the
+    /// account's.
+    ImportedToOtherAccount,
 }
 
 impl fmt::Display for EntryError {
@@ -82,6 +92,7 @@ impl fmt::Display for EntryError {
             EntryError::InvalidAmount => {
                 write!(f, "amount must be a number with at most as many decimal places as its currency has")
             }
+            EntryError::ImportedToOtherAccount => write!(f, "an imported entry can't be moved to another account"),
         }
     }
 }

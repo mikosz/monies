@@ -1,0 +1,117 @@
+import { LineEdit } from "std-widgets.slint";
+import { EntriesStore } from "entries-store.slint";
+import { LineColors } from "entry-line.slint";
+import { ReviewEntryLine, ReviewRow, ReviewTexts } from "review-line.slint";
+import { SuggestionLineEdit } from "suggestion-line-edit.slint";
+
+// A row of an import under review with input fields for its name and category, shown in place
+// of the line while it's edited. The other columns, and the entry shown with the row, are shown
+// as on the line. Column sizes come from the page so the fields align with the list.
+//
+// Enter submits, Escape cancels; Tab and Shift+Tab move between the two fields. The category
+// is suggested as when editing entries.
+export component ReviewRowEditor {
+    in property <ReviewRow> review-row;
+    // Height of the line of the entry shown with the row.
+    in property <length> line-height;
+    in property <length> column-spacing;
+    in property <length> status-width;
+    // Size of the icon of the entry shown with the row.
+    in property <length> icon-width;
+    in property <length> date-width;
+    in property <length> amount-width;
+    in property <length> flexible-width;
+    in property <length> horizontal-padding;
+
+    in-out property <string> name <=> name-input.text;
+    in-out property <string> category <=> category-input.text;
+
+    callback submitted();
+    callback cancelled();
+
+    public function focus-name() {
+        name-input.focus();
+        name-input.select-all();
+    }
+
+    function focus-category() {
+        category-input.focus();
+        category-input.select-all();
+    }
+
+    // Handles keys both fields share; `in-name` tells which one has them.
+    function handle-key(event: KeyEvent, in-name: bool) -> EventResult {
+        if (event.text == Key.Escape) {
+            root.cancelled();
+            return accept;
+        }
+        if (event.text == Key.Tab || event.text == Key.Backtab) {
+            if (in-name) {
+                root.focus-category();
+            } else {
+                root.focus-name();
+            }
+            return accept;
+        }
+        return reject;
+    }
+
+    VerticalLayout {
+        HorizontalLayout {
+            padding-left: root.horizontal-padding;
+            padding-right: root.horizontal-padding;
+            spacing: root.column-spacing;
+
+            Text {
+                width: root.status-width;
+                text: ReviewTexts.status(root.review-row.status);
+                font-weight: 600;
+                vertical-alignment: center;
+            }
+            Text {
+                width: root.date-width;
+                text: root.review-row.date;
+                vertical-alignment: center;
+            }
+            name-input := LineEdit {
+                horizontal-stretch: 1;
+                min-width: root.flexible-width;
+                preferred-width: root.flexible-width;
+                placeholder-text: "Name";
+                accepted => { root.submitted(); }
+                key-pressed(event) => { return root.handle-key(event, true); }
+            }
+            category-input := SuggestionLineEdit {
+                horizontal-stretch: 1;
+                min-width: root.flexible-width;
+                preferred-width: root.flexible-width;
+                placeholder-text: "Category, e.g. bills.rent";
+                suggestions: EntriesStore.category-suggestions;
+                // Picking a category continues with its subcategories.
+                pick-suffix: ".";
+                edited(text) => { EntriesStore.category-edited(text); }
+                accepted => { root.submitted(); }
+                key-pressed(event) => { return root.handle-key(event, false); }
+            }
+            Text {
+                width: root.amount-width;
+                text: root.review-row.amount;
+                color: LineColors.amount(root.review-row.kind);
+                horizontal-alignment: right;
+                vertical-alignment: center;
+            }
+        }
+
+        if root.review-row.has-entry : ReviewEntryLine {
+            height: root.line-height;
+            entry: root.review-row.entry;
+            column-spacing: root.column-spacing;
+            status-width: root.status-width;
+            icon-width: root.icon-width;
+            date-width: root.date-width;
+            amount-width: root.amount-width;
+            flexible-width: root.flexible-width;
+            horizontal-padding: root.horizontal-padding;
+        }
+    }
+}

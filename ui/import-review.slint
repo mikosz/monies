@@ -1,0 +1,449 @@
+import { Button, Palette, ScrollView } from "std-widgets.slint";
+import { LineColors } from "entry-line.slint";
+import { ImportsStore } from "imports-store.slint";
+import { ReviewLine, ReviewStatus, RowDecision } from "review-line.slint";
+import { ReviewRowEditor } from "review-row-editor.slint";
+
+// The header of the section of rows already in Monies, which expands and collapses it.
+component SectionHeader inherits Rectangle {
+    in property <string> text;
+    in property <bool> expanded;
+    in property <bool> selected;
+    // Greyed out and not interactive, e.g. while a row is being edited.
+    in property <bool> dimmed;
+    in property <length> horizontal-padding;
+
+    callback clicked();
+
+    background: touch.has-hover ? LineColors.hovered(Palette.background) : Palette.background;
+    border-radius: 4px;
+    border-width: root.selected ? 2px : 0px;
+    border-color: Palette.accent-background;
+    opacity: root.dimmed ? 0.4 : 1;
+    animate background, opacity { duration: 100ms; }
+
+    touch := TouchArea {
+        enabled: !root.dimmed;
+        clicked => { root.clicked(); }
+    }
+
+    HorizontalLayout {
+        padding-left: root.horizontal-padding;
+        padding-right: root.horizontal-padding;
+        spacing: 8px;
+
+        // A chevron pointing down while expanded, to the right while collapsed.
+        VerticalLayout {
+            alignment: center;
+
+            Path {
+                width: 12px;
+                height: 12px;
+                viewbox-width: 12;
+                viewbox-height: 12;
+                commands: root.expanded ? "M 2 4 L 6 8 L 10 4" : "M 4 2 L 8 6 L 4 10";
+                stroke: Palette.foreground;
+                stroke-width: 1.5px;
+            }
+        }
+        Text {
+            horizontal-stretch: 1;
+            text: root.text;
+            font-weight: 600;
+            overflow: elide;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// Reviewing the pending import `ImportsStore.review` row by row, by keyboard: Up/Down (and
+// Home/End) select a row; A accepts it, S skips it, and L and I link it to the entry it may be,
+// keeping that entry's name and category or using the row's; each moves on to the next row.
+// Enter or a double click edits the row's name and category in place, which is modal like
+// editing entries; rows linked to keep their entry aren't edited, as nothing of them but the
+// statement line is used. Clicking a row's status toggles between adding and skipping it.
+// Escape goes back to the list, leaving the import pending.
+//
+// Rows whose line is certainly in Monies already are left out of the import whatever their
+// status, so they're in a section of their own after the others, collapsed at first. Enter or
+// a click on its header expands or collapses it. Its rows can be selected, but not decided
+// about or edited.
+//
+// Every decision and edit is a change of its own, so undo and redo work row by row. The import
+// can be submitted once every row is decided and the accepted ones are complete.
+export component ImportReview inherits FocusScope {
+    // Greyed out and not interactive, e.g. while a discard awaits confirmation.
+    in property <bool> dimmed;
+
+    // Asks to discard the import.
+    callback discard();
+
+    // Header and lines share these so the columns line up. The name and category share what's
+    // left. The status column also holds the icon and label of a row's entry on its second
+    // line, hence its width.
+    property <length> column-spacing: 8px;
+    property <length> status-width: 136px;
+    property <length> icon-width: 16px;
+    property <length> date-width: 80px;
+    property <length> amount-width: 90px;
+    property <length> flexible-width: 120px;
+    property <length> line-padding: 8px;
+    // Rows have one line, or two when they show an entry, of a fixed height plus the card's
+    // padding, and the gap below them; so the selected one can be found and scrolled into view.
+    property <length> line-height: 26px;
+    property <length> card-padding: 2px;
+    property <length> row-gap: 3px;
+    // Of the section's header, with the gap below it.
+    property <length> header-height: 32px;
+
+    // The rows that may be added, then those already in Monies (see `ImportsStore.review-rows`).
+    property <int> other-count: ImportsStore.review-rows.length - ImportsStore.review.duplicates;
+    property <bool> has-section: ImportsStore.review.duplicates > 0;
+    property <bool> expanded: false;
+    // Selectable items are the rows that may be added, then the section's header and, while
+    // it's expanded, its rows. `selected` is the index of one.
+    property <int> item-count: root.other-count
+        + (root.has-section ? 1 + (root.expanded ? ImportsStore.review.duplicates : 0) : 0);
+    property <int> selected: 0;
+    property <bool> header-selected: root.has-section && root.selected == root.other-count;
+    // Whether the selected item is a row that may be added, which can be decided about and
+    // edited.
+    property <bool> row-selected: root.selected < root.other-count;
+    property <bool> editing: ImportsStore.editing-position >= 0;
+    // Everything but the editor or the page's confirmation is disabled.
+    property <bool> modal: root.editing || root.dimmed;
+
+    init => { root.focus(); }
+
+    // Takes the keys back once the page's confirmation is gone.
+    changed dimmed => {
+        if (!self.dimmed) {
+            root.focus();
+        }
+    }
+
+    // Height of a row's card, `two-lines` when it shows an entry.
+    pure function card-height(two-lines: bool) -> length {
+        return (two-lines ? 2 : 1) * root.line-height + 2 * root.card-padding;
+    }
+
+    // The item of the row at `index` of `ImportsStore.review-rows`: the section's rows come
+    // after its header.
+    pure function item(index: int) -> int {
+        return index < root.other-count ? index : index + 1;
+    }
+
+    // Selects the item at `item`, within the items, and scrolls it into view.
+    function select(item: int) {
+        root.selected = Math.max(0, Math.min(item, root.item-count - 1));
+        // The header is right above the section's first row, whose lines above are those of
+        // the other rows.
+        let index = root.selected > root.other-count ? root.selected - 1 : root.selected;
+        let row = ImportsStore.review-rows[index];
+        let top = index * (2 * root.card-padding + root.row-gap) + row.lines-above * root.line-height
+            + (root.selected > root.other-count ? root.header-height : 0px);
+        let height = root.header-selected ? root.header-height : root.card-height(row.has-entry) + root.row-gap;
+        if (top + list.content-y < 0) {
+            list.content-y = -top;
+        } else if (top + height + list.content-y > list.visible-height) {
+            list.content-y = list.visible-height - top - height;
+        }
+    }
+
+    function toggle-section() {
+        root.expanded = !root.expanded;
+        root.select(root.other-count);
+    }
+
+    // Decides about the selected row and moves on to the next one. Only rows that may be an
+    // entry typed in can be linked; for others, linking is ignored, as is deciding about rows
+    // already in Monies and the section's header.
+    function decide(decision: RowDecision) {
+        let row = ImportsStore.review-rows[root.selected];
+        let linking = decision == RowDecision.keep-entry || decision == RowDecision.use-imported;
+        if (root.row-selected && (!linking || row.linkable)) {
+            ImportsStore.decide-row(row.position, decision);
+            root.select(root.selected + 1);
+        }
+    }
+
+    // Selects the item and edits it if it's a row that may be added.
+    function start-edit(item: int) {
+        root.select(item);
+        let row = ImportsStore.review-rows[root.selected];
+        if (root.row-selected && row.status != ReviewStatus.keep-entry) {
+            ImportsStore.editing-position = row.position;
+        }
+    }
+
+    function finish-edit() {
+        ImportsStore.editing-position = -1;
+        root.focus();
+    }
+
+    key-pressed(event) => {
+        if (root.modal || ImportsStore.review-rows.length == 0
+            || event.modifiers.control || event.modifiers.alt || event.modifiers.meta) {
+            return reject;
+        }
+        if (event.text == Key.UpArrow) {
+            root.select(root.selected - 1);
+            return accept;
+        }
+        if (event.text == Key.DownArrow) {
+            root.select(root.selected + 1);
+            return accept;
+        }
+        if (event.text == Key.Home) {
+            root.select(0);
+            return accept;
+        }
+        if (event.text == Key.End) {
+            root.select(root.item-count - 1);
+            return accept;
+        }
+        if (event.text == Key.Return) {
+            if (root.header-selected) {
+                root.toggle-section();
+            } else {
+                root.start-edit(root.selected);
+            }
+            return accept;
+        }
+        if (event.text == Key.Escape) {
+            ImportsStore.review-import("");
+            return accept;
+        }
+        if (event.text == "a" || event.text == "A") {
+            root.decide(RowDecision.accept);
+            return accept;
+        }
+        if (event.text == "s" || event.text == "S") {
+            root.decide(RowDecision.skip);
+            return accept;
+        }
+        if (event.text == "l" || event.text == "L") {
+            root.decide(RowDecision.keep-entry);
+            return accept;
+        }
+        if (event.text == "i" || event.text == "I") {
+            root.decide(RowDecision.use-imported);
+            return accept;
+        }
+        return reject;
+    }
+
+    VerticalLayout {
+        spacing: 4px;
+
+        // Layouts have no opacity, hence the rectangle.
+        Rectangle {
+            opacity: root.modal ? 0.4 : 1;
+
+            VerticalLayout {
+                spacing: 4px;
+
+                HorizontalLayout {
+                    padding-bottom: 6px;
+                    spacing: 8px;
+
+                    Text {
+                        horizontal-stretch: 1;
+                        text: "‘\{ImportsStore.review.source}’ into ‘\{ImportsStore.review.account}’";
+                        font-size: 16px;
+                        font-weight: 600;
+                        overflow: elide;
+                        vertical-alignment: center;
+                    }
+                    Button {
+                        text: "Back";
+                        enabled: !root.modal;
+                        clicked => { ImportsStore.review-import(""); }
+                    }
+                    Button {
+                        text: "Discard";
+                        enabled: !root.modal;
+                        clicked => { root.discard(); }
+                    }
+                }
+
+                HorizontalLayout {
+                    padding-left: root.line-padding;
+                    padding-right: root.line-padding;
+                    spacing: root.column-spacing;
+
+                    Text {
+                        width: root.status-width;
+                        text: "Status";
+                        font-weight: 700;
+                    }
+                    Text {
+                        width: root.date-width;
+                        text: "Date";
+                        font-weight: 700;
+                    }
+                    Text {
+                        horizontal-stretch: 1;
+                        min-width: root.flexible-width;
+                        preferred-width: root.flexible-width;
+                        text: "Name";
+                        font-weight: 700;
+                    }
+                    Text {
+                        horizontal-stretch: 1;
+                        min-width: root.flexible-width;
+                        preferred-width: root.flexible-width;
+                        text: "Category";
+                        font-weight: 700;
+                    }
+                    Text {
+                        width: root.amount-width;
+                        text: "Amount";
+                        font-weight: 700;
+                        horizontal-alignment: right;
+                    }
+                }
+            }
+        }
+
+        // Not a ListView: that only estimates where the rows it hasn't shown yet are, which
+        // with rows of different heights would scroll the selected one only roughly into view.
+        // Imports are short enough to have all their rows laid out.
+        list := ScrollView {
+            vertical-stretch: 1;
+            content-width: self.visible-width;
+            content-height: rows.preferred-height;
+
+            rows := VerticalLayout {
+                width: list.visible-width;
+                alignment: start;
+
+                for row[index] in ImportsStore.review-rows : VerticalLayout {
+                    // The section starts with the first of its rows.
+                    if index == root.other-count : VerticalLayout {
+                        padding-bottom: root.row-gap;
+
+                        SectionHeader {
+                            height: root.header-height - root.row-gap;
+                            text: ImportsStore.review.duplicates-title;
+                            expanded: root.expanded;
+                            selected: root.header-selected;
+                            dimmed: root.modal;
+                            horizontal-padding: root.line-padding;
+                            clicked => {
+                                root.toggle-section();
+                                root.focus();
+                            }
+                        }
+                    }
+
+                    if !row.duplicate || root.expanded : VerticalLayout {
+                        padding-bottom: root.row-gap;
+
+                        if !root.editing || row.position != ImportsStore.editing-position : ReviewLine {
+                            height: root.card-height(row.has-entry);
+                            review-row: row;
+                            selected: root.item(index) == root.selected;
+                            // Shading starts afresh in the section.
+                            odd: Math.mod(row.duplicate ? index - root.other-count : index, 2) == 1;
+                            dimmed: root.modal;
+                            read-only: row.duplicate;
+                            line-height: root.line-height;
+                            column-spacing: root.column-spacing;
+                            status-width: root.status-width;
+                            icon-width: root.icon-width;
+                            date-width: root.date-width;
+                            amount-width: root.amount-width;
+                            flexible-width: root.flexible-width;
+                            horizontal-padding: root.line-padding;
+                            clicked => {
+                                root.select(root.item(index));
+                                root.focus();
+                            }
+                            double-clicked => { root.start-edit(root.item(index)); }
+                            // Not for rows already in Monies, which are read-only.
+                            status-clicked => {
+                                root.select(root.item(index));
+                                ImportsStore.decide-row(row.position, row.status == ReviewStatus.add ? RowDecision.skip : RowDecision.accept);
+                                root.focus();
+                            }
+                        }
+
+                        if root.editing && row.position == ImportsStore.editing-position : Rectangle {
+                            border-width: 1px;
+                            border-color: Palette.accent-background;
+                            border-radius: 4px;
+
+                            VerticalLayout {
+                                padding: 2px;
+
+                                ReviewRowEditor {
+                                    review-row: row;
+                                    line-height: root.line-height;
+                                    column-spacing: root.column-spacing;
+                                    status-width: root.status-width;
+                                    icon-width: root.icon-width;
+                                    date-width: root.date-width;
+                                    amount-width: root.amount-width;
+                                    flexible-width: root.flexible-width;
+                                    // Aligns the columns with the lines despite the border and padding.
+                                    horizontal-padding: root.line-padding - 3px;
+                                    init => {
+                                        self.name = row.name;
+                                        self.category = row.category;
+                                        self.focus-name();
+                                    }
+                                    // An empty name is refused, leaving the editor open.
+                                    submitted => {
+                                        if (ImportsStore.edit-row(row.position, self.name, self.category)) {
+                                            root.finish-edit();
+                                        }
+                                    }
+                                    cancelled => { root.finish-edit(); }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Rectangle {
+            opacity: root.modal ? 0.4 : 1;
+
+            VerticalLayout {
+                spacing: 4px;
+
+                HorizontalLayout {
+                    padding-top: 4px;
+                    spacing: 8px;
+
+                    Text {
+                        horizontal-stretch: 1;
+                        text: "\{ImportsStore.review.to-add} to add · \{ImportsStore.review.skipped} skipped · \{ImportsStore.review.linked} linked · \{ImportsStore.review.to-review} to review";
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: ImportsStore.review.submit-hint;
+                        color: #e53935;
+                        vertical-alignment: center;
+                    }
+                    Button {
+                        text: ImportsStore.review.submit-label;
+                        primary: true;
+                        enabled: !root.modal && ImportsStore.review.submit-hint == "";
+                        clicked => {
+                            ImportsStore.submit-review();
+                            root.focus();
+                        }
+                    }
+                }
+                Text {
+                    text: "A accept · S skip · L link, keep mine · I link, use import · Enter edit · Esc back";
+                    font-size: 12px;
+                    opacity: 0.7;
+                }
+            }
+        }
+    }
+}

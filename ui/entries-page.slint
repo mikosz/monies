@@ -10,7 +10,9 @@ export { EntriesStore, EntryKind, EntryRow, RowType }
 // The list of entries by date, divided into months. Pressing A adds entries in a line at the
 // end of the list until Escape; double-clicking a line edits it in place. Both are modal:
 // everything else is dimmed and disabled meanwhile. Without an account, entries can't be added.
-// The account column is only shown when there are several accounts.
+// The account column is only shown when there are several accounts. An icon marks entries
+// typed in rather than imported; imported ones can't be moved to another account. Amounts are
+// shown without a sign; their colour tells expenses from income.
 export component EntriesPage inherits Page {
     title: "Entries";
     description: "";
@@ -18,8 +20,9 @@ export component EntriesPage inherits Page {
     // Header and lines share these constraints so the columns line up.
     property <length> column-spacing: 8px;
     property <length> account-width: 130px;
+    property <length> icon-width: 16px;
     property <length> date-width: 110px;
-    // Fits currency symbols too, e.g. "-12345.67 CHF".
+    // Fits currency symbols too, e.g. "12345.67 CHF".
     property <length> amount-width: 140px;
     property <length> flexible-width: 100px;
     // Padding inside an entry line; the header uses the same so its titles align.
@@ -78,6 +81,9 @@ export component EntriesPage inherits Page {
                     padding-right: root.line-padding;
                     spacing: root.column-spacing;
 
+                    Rectangle {
+                        width: root.icon-width;
+                    }
                     if EntriesStore.several-accounts : Text {
                         width: root.account-width;
                         text: "Account";
@@ -151,6 +157,7 @@ export component EntriesPage inherits Page {
                         show-account: EntriesStore.several-accounts;
                         column-spacing: root.column-spacing;
                         account-width: root.account-width;
+                        icon-width: root.icon-width;
                         date-width: root.date-width;
                         amount-width: root.amount-width;
                         flexible-width: root.flexible-width;
@@ -169,8 +176,10 @@ export component EntriesPage inherits Page {
 
                             EntryEditor {
                                 show-account: EntriesStore.several-accounts;
+                                account-locked: row.imported;
                                 column-spacing: root.column-spacing;
                                 account-width: root.account-width;
+                                icon-width: root.icon-width;
                                 date-width: root.date-width;
                                 amount-width: root.amount-width;
                                 flexible-width: root.flexible-width;

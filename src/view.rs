@@ -6,12 +6,15 @@ use slint::{ComponentHandle, Model, SharedString, VecModel};
 use crate::account::AccountId;
 use crate::currency::Currency;
 use crate::date_format::DateFormat;
-use crate::duplicates::{MatchCounts, find_matches};
+use crate::duplicates::{Match, MatchCounts};
 use crate::entry::{self, Entry, EntryId, format_amount};
+use crate::import::{Import, ImportId, LinkKind, RowStatus};
 use crate::ledger::Ledger;
 use crate::listing::{ListItem, Splice, list_items, splice};
+use crate::review::{self, Counts, RelatedEntry};
 use crate::{
-    AccountRow, Alert, EntriesStore, EntryKind, EntryRow, ImportsStore, MainWindow, PendingImport, RowType, SettingsStore,
+    AccountRow, Alert, EntriesStore, EntryKind, EntryRow, ImportsStore, MainWindow, PendingImport, ReviewEntry,
+    ReviewRow, ReviewStatus, ReviewedImport, RowType, SettingsStore,
 };
 
 /// Mirrors the ledger into the UI.
@@ -38,6 +41,10 @@ pub struct View {
     currency_suggestions: Rc<VecModel<SharedString>>,
     /// Pending imports of accounts that aren't deleted.
     imports: Rc<VecModel<PendingImport>>,
+    /// The pending import under review, if any.
+    reviewing: Cell<Option<ImportId>>,
+    /// The rows of the import under review.
+    review_rows: Rc<VecModel<ReviewRow>>,
 }
 
 impl View {
@@ -58,6 +65,8 @@ impl View {
             new_account_id: settings.get_new_account_id(),
             currency_suggestions: Rc::new(VecModel::default()),
             imports: Rc::new(VecModel::default()),
+            reviewing: Cell::default(),
+            review_rows: Rc::new(VecModel::default()),
         };
         store.set_date_placeholder(view.date_format.placeholder().into());
         store.set_entries(view.rows.clone().into());
@@ -65,7 +74,9 @@ impl View {
         store.set_account_suggestions(view.account_suggestions.clone().into());
         settings.set_accounts(view.accounts.clone().into());
         settings.set_currency_suggestions(view.currency_suggestions.clone().into());
-        window.global::<ImportsStore>().set_imports(view.imports.clone().into());
+        let imports = window.global::<ImportsStore>();
+        imports.set_imports(view.imports.clone().into());
+        imports.set_review_rows(view.review_rows.clone().into());
         view
     }
 
@@ -73,19 +84,24 @@ impl View {
         &self.date_format
     }
 
-    /// Shows the ledger's entries, accounts and pending imports, updating only the rows that
-    /// changed.
+    /// Shows the ledger's entries, accounts and pending imports, and the import under review,
+    /// updating only the rows that changed.
     pub fn show(&self, ledger: &Ledger) {
         let new_entry = EntryRow { id: self.new_entry_id.clone(), row_type: RowType::NewEntry, ..Default::default() };
+        // Entries alternate in shade, starting afresh with every month.
+        let mut odd = false;
         let rows: Vec<EntryRow> = list_items(ledger)
             .into_iter()
             .map(|item| match item {
-                ListItem::Period(start) => EntryRow {
-                    row_type: RowType::Month,
-                    title: start.format("%B %Y").to_string().into(),
-                    ..Default::default()
-                },
-                ListItem::Entry(id, entry) => self.entry_row(id, entry, ledger),
+                ListItem::Period(start) => {
+                    odd = false;
+                    EntryRow { row_type: RowType::Month, title: start.format("%B %Y").to_string().into(), ..Default::default() }
+                }
+                ListItem::Entry(id, entry) => {
+                    let row = EntryRow { odd, ..self.entry_row(id, entry, ledger) };
+                    odd = !odd;
+                    row
+                }
             })
             .chain([new_entry])
             .collect();
@@ -97,6 +113,7 @@ impl View {
         self.show_session_account(ledger);
         self.show_accounts(ledger);
         self.show_imports(ledger);
+        self.show_review(ledger);
     }
 
     /// Called after an entry was added to `account` (and shown): the inputs are cleared, and
@@ -125,6 +142,17 @@ impl View {
         self.currency_suggestions.set_vec(suggestions.collect::<Vec<_>>());
     }
 
+    /// The pending import under review, if any.
+    pub fn reviewing(&self) -> Option<ImportId> {
+        self.reviewing.get()
+    }
+
+    /// Reviews the import, or goes back to the list of imports with `None`.
+    pub fn review(&self, ledger: &Ledger, id: Option<ImportId>) {
+        self.reviewing.set(id);
+        self.show_review(ledger);
+    }
+
     /// Shows a message in a dialog over the window until the user dismisses it.
     pub fn show_error(&self, title: &str, message: &str) {
         if let Some(window) = self.window.upgrade() {
@@ -144,12 +172,9 @@ impl View {
             name: entry.name.as_str().into(),
             category: ledger.categories().path(entry.category).into(),
             amount: format_amount(entry.amount, account.currency.decimals()).into(),
-            amount_display: account.currency.format_amount(entry.amount).into(),
-            kind: match entry.kind() {
-                entry::EntryKind::Expense => EntryKind::Expense,
-                entry::EntryKind::Income => EntryKind::Income,
-                entry::EntryKind::Neutral => EntryKind::Neutral,
-            },
+            amount_display: account.currency.format_magnitude(entry.amount).into(),
+            kind: entry_kind(entry.kind()),
+            imported: entry.statement.is_some(),
             ..Default::default()
         }
     }
@@ -218,13 +243,11 @@ impl View {
     /// Shows the pending imports with how their lines match the entries now, which changes as
     /// entries are added, edited or deleted.
     fn show_imports(&self, ledger: &Ledger) {
-        let count = |count: usize| i32::try_from(count).unwrap_or(i32::MAX);
         let rows: Vec<PendingImport> = ledger
             .visible_imports()
             .map(|(id, import)| {
                 let account = ledger.accounts().get(import.account).expect("imports refer to existing accounts");
-                let matches = find_matches(ledger, import.account, import.rows.iter().map(|row| &row.line));
-                let counts = MatchCounts::of(&matches);
+                let counts = MatchCounts::of(&import.matches(ledger));
                 let created = import.created.with_timezone(&chrono::Local);
                 PendingImport {
                     id: id.0.to_string().into(),
@@ -238,6 +261,115 @@ impl View {
             })
             .collect();
         update_model(&self.imports, rows);
+    }
+
+    /// Shows the import under review with how its lines match the entries now, like
+    /// `show_imports`. Goes back to the list once the import is gone, or hidden with its
+    /// account.
+    fn show_review(&self, ledger: &Ledger) {
+        let reviewed = self.reviewing.get().and_then(|id| ledger.visible_imports().find(|&(other, _)| other == id));
+        let (review, rows) = match reviewed {
+            Some((id, import)) => self.review_of(ledger, id, import),
+            None => {
+                self.reviewing.set(None);
+                (ReviewedImport::default(), Vec::new())
+            }
+        };
+        update_model(&self.review_rows, rows);
+        if let Some(window) = self.window.upgrade() {
+            window.global::<ImportsStore>().set_review(review);
+        }
+    }
+
+    fn review_of(&self, ledger: &Ledger, id: ImportId, import: &Import) -> (ReviewedImport, Vec<ReviewRow>) {
+        let account = ledger.accounts().get(import.account).expect("imports refer to existing accounts");
+        let matches = import.matches(ledger);
+        // Rows whose line is certainly in Monies already come last, in a section of their own;
+        // both parts are in statement order.
+        let (duplicates, others): (Vec<_>, Vec<_>) = import
+            .rows
+            .iter()
+            .zip(&matches)
+            .enumerate()
+            .partition(|(_, (_, found))| matches!(found, Match::Duplicate(_)));
+        let mut rows = Vec::with_capacity(import.rows.len());
+        // Rows with an entry take two lines.
+        let mut lines_above = 0;
+        for (position, (row, &found)) in others.into_iter().chain(duplicates) {
+            let duplicate = matches!(found, Match::Duplicate(_));
+            let related = review::related_entry(ledger, import.account, row, found);
+            let used = !duplicate && row.uses_imported_data();
+            rows.push(ReviewRow {
+                position: count(position),
+                // Left out whatever their status, see `ChangeBuilder::submit_import`.
+                status: match row.status {
+                    _ if duplicate => ReviewStatus::Skip,
+                    RowStatus::Pending => ReviewStatus::Pending,
+                    RowStatus::Accepted => ReviewStatus::Add,
+                    RowStatus::Skipped => ReviewStatus::Skip,
+                    RowStatus::Linked(_, LinkKind::KeepEntry) => ReviewStatus::KeepEntry,
+                    RowStatus::Linked(_, LinkKind::UseImported) => ReviewStatus::UseImported,
+                },
+                duplicate,
+                linkable: review::link_target(ledger, found).is_some(),
+                date: self.date_format.format(row.line.date).into(),
+                name: row.name.as_str().into(),
+                category: row.category.as_ref().map(ToString::to_string).unwrap_or_default().into(),
+                amount: account.currency.format_magnitude(row.line.amount).into(),
+                kind: entry_kind(entry::EntryKind::of(row.line.amount)),
+                missing_name: used && row.name.trim().is_empty(),
+                missing_category: used && row.category.is_none(),
+                has_entry: related.is_some(),
+                entry: related.map(|related| self.review_entry(ledger, related)).unwrap_or_default(),
+                lines_above: count(lines_above),
+            });
+            lines_above += if related.is_some() { 2 } else { 1 };
+        }
+
+        let counts = Counts::of(&import.rows, &matches);
+        let review = ReviewedImport {
+            id: id.0.to_string().into(),
+            account: account.name.as_str().into(),
+            source: import.source.as_str().into(),
+            to_add: count(counts.to_add),
+            skipped: count(counts.skipped),
+            linked: count(counts.linked),
+            to_review: count(counts.to_review),
+            duplicates: count(counts.duplicates),
+            duplicates_title: review::duplicates_title(counts.duplicates).into(),
+            submit_label: review::submit_label(counts).into(),
+            submit_hint: review::submit_hint(ledger, import).unwrap_or_default().into(),
+        };
+        (review, rows)
+    }
+
+    fn review_entry(&self, ledger: &Ledger, related: RelatedEntry) -> ReviewEntry {
+        let label = related.label.into();
+        let Some(entry) = related.entry else { return ReviewEntry { label, ..Default::default() } };
+        let currency = ledger.accounts().get(entry.account).expect("entries refer to existing accounts").currency;
+        ReviewEntry {
+            label,
+            exists: true,
+            date: self.date_format.format(entry.date).into(),
+            name: entry.name.as_str().into(),
+            category: ledger.categories().path(entry.category).into(),
+            amount: currency.format_magnitude(entry.amount).into(),
+            kind: entry_kind(entry.kind()),
+            imported: entry.statement.is_some(),
+        }
+    }
+}
+
+/// A count for the UI, whose integers are 32-bit.
+fn count(count: usize) -> i32 {
+    i32::try_from(count).unwrap_or(i32::MAX)
+}
+
+fn entry_kind(kind: entry::EntryKind) -> EntryKind {
+    match kind {
+        entry::EntryKind::Expense => EntryKind::Expense,
+        entry::EntryKind::Income => EntryKind::Income,
+        entry::EntryKind::Neutral => EntryKind::Neutral,
     }
 }
 

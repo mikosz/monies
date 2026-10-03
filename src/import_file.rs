@@ -4,6 +4,8 @@
 //! A file is only imported when all of it is valid. Otherwise every problem found is reported
 //! with where it is, so they can all be fixed at once.
 
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::fmt;
 
 use chrono::NaiveDate;
@@ -14,7 +16,7 @@ use crate::account::{Account, AccountId, Accounts};
 use crate::category::CategoryPath;
 use crate::currency::Currency;
 use crate::date_format::DateFormat;
-use crate::duplicates::find_matches;
+use crate::duplicates::{Match, find_matches};
 use crate::entry::parse_amount;
 use crate::import::{ImportRow, RowStatus, StatementLine};
 use crate::ledger::Ledger;
@@ -34,7 +36,9 @@ pub struct LoadedImport {
 
 /// Reads an import file: every statement becomes an import into its account. `file_name` is
 /// the source of statements that don't name one. Rows start out as duplicate detection against
-/// the ledger suggests, see [`crate::duplicates::Match::initial_status`].
+/// the ledger suggests, see [`Match::initial_status`]. Every row has a name: that of the entry
+/// its line certainly is, which gives the category too; otherwise the proposed one, or the
+/// bank's text.
 pub fn load(text: &str, file_name: &str, ledger: &Ledger) -> Result<Vec<LoadedImport>, FileError> {
     // Windows editors may start UTF-8 files with a byte order mark, which JSON doesn't allow.
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
@@ -85,11 +89,18 @@ fn load_statement(
     // it's valid, otherwise in the account's, otherwise as if it had cents.
     let stated = raw.currency.as_deref().and_then(Currency::parse);
     let decimals = stated.or(account.map(|(_, account)| account.currency)).map_or(2, |currency| currency.decimals());
+    // The lines first having each reference.
+    let mut references = HashMap::new();
     let rows: Vec<Option<ImportRow>> = raw
         .lines
         .iter()
         .enumerate()
-        .map(|(line, raw)| load_line(raw, Location::Line { statement: index, line }, decimals, problems))
+        .map(|(line, raw)| {
+            let at = Location::Line { statement: index, line };
+            let row = load_line(raw, at, decimals, problems);
+            let unique = problems.check(at, check_reference(raw.reference.as_deref(), line, &mut references));
+            row.filter(|_| unique.is_some())
+        })
         .collect();
 
     let (account, _) = account?;
@@ -98,26 +109,34 @@ fn load_statement(
     let matches = find_matches(ledger, account, rows.iter().map(|row| &row.line));
     for (row, found) in rows.iter_mut().zip(matches) {
         row.status = found.initial_status();
+        // The user's own data takes precedence over the file's proposals.
+        if let Match::Duplicate(id) = found {
+            let entry = ledger.entry(id).expect("matches are entries of the ledger");
+            row.name = entry.name.clone();
+            row.category = Some(ledger.categories().category_path(entry.category));
+        }
     }
     let source = given(raw.source.as_deref()).unwrap_or(file_name).to_owned();
     Some(LoadedImport { account, source, rows })
 }
 
 /// Validates a statement line, recording its problems; returns it as a row when it has none.
-/// Its status is left for duplicate detection.
+/// Without a proposed name, the row is named by the bank's text. Its status is left for
+/// duplicate detection.
 fn load_line(raw: &RawLine, at: Location, decimals: u32, problems: &mut Problems) -> Option<ImportRow> {
     let date = problems.check(at, parse_date(raw.date.as_deref()));
     let amount = problems.check(at, parse_bank_amount(raw.amount.as_ref(), decimals));
     let text = problems.check(at, given(raw.text.as_deref()).ok_or(ProblemKind::MissingText));
+    let text = text?;
     let line = StatementLine {
         date: date?,
         amount: amount?,
-        text: text?.to_owned(),
+        text: text.to_owned(),
         reference: given(raw.reference.as_deref()).map(str::to_owned),
     };
     Some(ImportRow {
         line,
-        name: given(raw.name.as_deref()).unwrap_or_default().to_owned(),
+        name: given(raw.name.as_deref()).unwrap_or(text).to_owned(),
         category: raw.category.as_deref().and_then(CategoryPath::parse),
         status: RowStatus::Pending,
     })
@@ -126,6 +145,26 @@ fn load_line(raw: &RawLine, at: Location, decimals: u32, problems: &mut Problems
 /// The trimmed text, unless there's none: empty and missing values are the same.
 fn given(text: Option<&str>) -> Option<&str> {
     text.map(str::trim).filter(|text| !text.is_empty())
+}
+
+/// Checks that no earlier line of the statement, recorded in `references` with the lines first
+/// having them, has the reference of `line`, if it has one; records it otherwise. The bank's
+/// ids are unique per account, see [`StatementLine::reference`].
+fn check_reference<'a>(
+    reference: Option<&'a str>,
+    line: usize,
+    references: &mut HashMap<&'a str, usize>,
+) -> Result<(), ProblemKind> {
+    let Some(reference) = given(reference) else { return Ok(()) };
+    match references.entry(reference) {
+        Entry::Occupied(first) => {
+            Err(ProblemKind::DuplicateReference { reference: reference.to_owned(), first: *first.get() })
+        }
+        Entry::Vacant(vacant) => {
+            vacant.insert(line);
+            Ok(())
+        }
+    }
 }
 
 /// The active account with the name, ignoring case.
@@ -308,6 +347,8 @@ pub enum ProblemKind {
     /// The amount has more decimal places than its currency, which has this many.
     TooManyDecimals(u32),
     MissingText,
+    /// An earlier line of the statement, the one at index `first`, has the line's reference.
+    DuplicateReference { reference: String, first: usize },
 }
 
 impl fmt::Display for ProblemKind {
@@ -341,6 +382,10 @@ impl fmt::Display for ProblemKind {
             ProblemKind::TooManyDecimals(1) => write!(f, "amount has more than 1 decimal place"),
             ProblemKind::TooManyDecimals(decimals) => write!(f, "amount has more than {decimals} decimal places"),
             ProblemKind::MissingText => write!(f, "text is missing"),
+            // Lines are numbered from 1 for the user.
+            ProblemKind::DuplicateReference { reference, first } => {
+                write!(f, "reference ‘{reference}’ is already used by line {}", first + 1)
+            }
         }
     }
 }
@@ -366,6 +411,7 @@ mod tests {
     use crate::change::ChangeBuilder;
     use crate::duplicates::MatchCounts;
     use crate::entry::ParsedEntry;
+    use crate::review::Counts;
     use crate::store::MemoryStore;
 
     /// A ledger with the accounts "Silver bank" in PLN, "Gold bank" in EUR and "Bronze bank" in
@@ -396,8 +442,9 @@ mod tests {
         error.problems.iter().map(Problem::to_string).collect()
     }
 
+    /// A row of a line that matches no entry, so it's accepted.
     fn row(date: &str, amount: i64, text: &str, reference: Option<&str>, name: &str, category: &str) -> ImportRow {
-        let mut row = ImportRow::test(date, amount, text, name, category, RowStatus::Pending);
+        let mut row = ImportRow::test(date, amount, text, name, category, RowStatus::Accepted);
         row.line.reference = reference.map(str::to_owned);
         row
     }
@@ -423,7 +470,7 @@ mod tests {
             source: "statement-2026-09.pdf".to_owned(),
             rows: vec![
                 row("2026-09-15", 1250, "CARD PAYMENT CORNER SHOP 0042", Some("TX-0001"), "Groceries", "food.shop"),
-                row("2026-09-16", -150000, "TRANSFER SALARY", None, "", ""),
+                row("2026-09-16", -150000, "TRANSFER SALARY", None, "TRANSFER SALARY", ""),
             ],
         }]);
     }
@@ -442,7 +489,7 @@ mod tests {
         assert_eq!(imports, [LoadedImport {
             account: gold,
             source: "statement-2026-09.json".to_owned(),
-            rows: vec![row("2026-09-15", 1250, "CARD PAYMENT CORNER SHOP 0042", None, "", "")],
+            rows: vec![row("2026-09-15", 1250, "CARD PAYMENT CORNER SHOP 0042", None, "CARD PAYMENT CORNER SHOP 0042", "")],
         }]);
     }
 
@@ -586,6 +633,30 @@ mod tests {
     }
 
     #[test]
+    fn references_are_unique_within_a_statement() {
+        let (ledger, _) = ledger();
+        let line = |text, reference| {
+            format!(r#"{{"date": "2026-09-15", "amount": "-12.50", "text": "{text}", "reference": "{reference}"}}"#)
+        };
+        let lines = [
+            line("CARD PAYMENT CORNER SHOP 0042", "TX-0001"),
+            line("CARD PAYMENT BAKERY 0007", "TX-0002"),
+            line("CARD PAYMENT CORNER SHOP 0043", " TX-0001 "),
+            line("BANK FEE", ""),
+            line("BANK FEE", ""),
+        ];
+        assert_eq!(problems(&gold_file(&lines.join(",")), &ledger), [
+            "statement 1, line 3: reference ‘TX-0001’ is already used by line 1"
+        ]);
+
+        let statement = |account, currency| {
+            format!(r#"{{"account": "{account}", "currency": "{currency}", "lines": [{}]}}"#, lines[0])
+        };
+        let text = file(&[statement("Gold bank", "EUR"), statement("Silver bank", "PLN")].join(","));
+        assert!(load(&text, "statements.json", &ledger).is_ok(), "in statements of different accounts");
+    }
+
+    #[test]
     fn currency_must_be_the_accounts() {
         let (ledger, _) = ledger();
         let text = |currency| {
@@ -639,9 +710,46 @@ mod tests {
         let statuses: Vec<RowStatus> = imports[0].rows.iter().map(|row| row.status).collect();
         assert_eq!(
             statuses,
-            [RowStatus::Skipped, RowStatus::Pending, RowStatus::Pending],
-            "an imported line is certainly a duplicate, one typed in only possibly"
+            [RowStatus::Skipped, RowStatus::Pending, RowStatus::Accepted],
+            "an imported line is certainly a duplicate, one typed in only possibly, and a new one is added"
         );
+    }
+
+    #[test]
+    fn names_rows_by_the_entry_they_certainly_are_then_the_file_then_the_bank_text() {
+        let (mut ledger, [silver, ..]) = ledger();
+        let mut builder = ChangeBuilder::new("Import", &ledger);
+        let rent = ImportRow::test("2026-09-01", 240000, "TRANSFER RENT FLAT 12", "Rent", "bills.Rent", RowStatus::Accepted);
+        let id = builder.add_import(silver, "statement-2026-08.json", vec![rent]);
+        let entry = builder.submit_import(id).unwrap()[0];
+        builder.add_entry(ParsedEntry::test(silver, "2026-09-14", "Groceries", "food", "104.88"));
+        let change = builder.build();
+        ledger.apply(&mut MemoryStore, &change).unwrap();
+        // Renamed since it was imported.
+        let current = ledger.entry(entry).unwrap().clone();
+        let mut builder = ChangeBuilder::new("Edit", &ledger);
+        builder.update_entry(entry, &current, ParsedEntry::test(silver, "2026-09-01", "Flat", "home.rent", "2400.00")).unwrap();
+        let change = builder.build();
+        ledger.apply(&mut MemoryStore, &change).unwrap();
+
+        let text = file(
+            r#"{"account": "Silver bank", "currency": "PLN", "lines": [
+                {"date": "2026-09-01", "amount": "-2400.00", "text": "TRANSFER RENT FLAT 12", "name": "Rent", "category": "bills"},
+                {"date": "2026-09-15", "amount": "-104.88", "text": "CARD PAYMENT CORNER SHOP 0042", "category": "food.shop"},
+                {"date": "2026-09-16", "amount": "-12.50", "text": " CARD PAYMENT BAKERY 0007 ", "name": "Bread"}
+            ]}"#,
+        );
+        let imports = load(&text, "statement-2026-09.json", &ledger).unwrap();
+        let proposals: Vec<(&str, Option<String>)> = imports[0]
+            .rows
+            .iter()
+            .map(|row| (row.name.as_str(), row.category.as_ref().map(ToString::to_string)))
+            .collect();
+        assert_eq!(proposals, [
+            ("Flat", Some("home.rent".to_owned())),
+            ("CARD PAYMENT CORNER SHOP 0042", Some("food.shop".to_owned())),
+            ("Bread", None),
+        ]);
     }
 
     #[test]
@@ -687,6 +795,11 @@ mod tests {
             MatchCounts::of(&matches),
             MatchCounts { new: 4, duplicates: 0, possible: 9 },
             "the holiday entries typed in are possible duplicates"
+        );
+        assert_eq!(
+            Counts::of(&import.rows, &matches),
+            Counts { to_add: 4, skipped: 0, linked: 0, to_review: 9, duplicates: 0 },
+            "new lines start accepted"
         );
     }
 }

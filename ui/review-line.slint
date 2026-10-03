@@ -1,0 +1,268 @@
+import { Palette } from "std-widgets.slint";
+import { EntryKind, LineColors, TypedInIcon } from "entry-line.slint";
+
+// What's been decided about a row of an import.
+export enum ReviewStatus {
+    // Not reviewed yet.
+    pending,
+    // Becomes an entry.
+    add,
+    skip,
+    // Linked to an entry typed in before, which keeps its name and category.
+    keep-entry,
+    // Linked to an entry typed in before, which takes the row's name and category.
+    use-imported
+}
+
+// What the user decides about a row.
+export enum RowDecision { accept, skip, keep-entry, use-imported }
+
+// Texts shared by the line and its editor.
+export global ReviewTexts {
+    // How the status is shown in the status column.
+    public pure function status(status: ReviewStatus) -> string {
+        return status == ReviewStatus.add ? "Add"
+            : status == ReviewStatus.skip ? "Skip"
+            : status == ReviewStatus.keep-entry ? "Keep mine"
+            : status == ReviewStatus.use-imported ? "Use import"
+            : "Review";
+    }
+}
+
+// An entry shown with a row of an import: the one the row is linked to, otherwise the one its
+// line matches.
+export struct ReviewEntry {
+    // How the entry relates to the row, e.g. "Already in Monies".
+    label: string,
+    // False when a linked entry is gone; the fields below are empty then.
+    exists: bool,
+    date: string,
+    name: string,
+    category: string,
+    // With the currency's symbol, e.g. "€12.50".
+    amount: string,
+    kind: EntryKind,
+    // Whether the entry was imported rather than typed in; only the latter have an icon.
+    imported: bool,
+}
+
+export struct ReviewRow {
+    // The row's index in the import's rows, in statement order, to refer back to it.
+    position: int,
+    status: ReviewStatus,
+    // Whether the row's line is certainly in Monies already. Such rows are left out whatever
+    // their status, so they're shown as skipped and can't be decided about or edited.
+    duplicate: bool,
+    // Whether the row can be linked: its line may be an entry typed in.
+    linkable: bool,
+    // The statement line's date.
+    date: string,
+    // The proposed entry's name, by default the bank's text, and category; the category may
+    // be empty.
+    name: string,
+    category: string,
+    // With the currency's symbol, e.g. "€12.50".
+    amount: string,
+    kind: EntryKind,
+    // Without a name or category although they're used, which they need to be submitted.
+    missing-name: bool,
+    missing-category: bool,
+    // Whether `entry` is shown on a second line.
+    has-entry: bool,
+    entry: ReviewEntry,
+    // How many lines the rows above take, to find where the row is in the list.
+    lines-above: int,
+}
+
+// The line of the entry shown with a row, under the row's own line and with its columns
+// aligned with it. The status column has an icon if the entry was typed in and tells how the
+// entry relates to the row.
+export component ReviewEntryLine inherits HorizontalLayout {
+    in property <ReviewEntry> entry;
+    in property <length> column-spacing;
+    in property <length> status-width;
+    in property <length> icon-width;
+    in property <length> date-width;
+    in property <length> amount-width;
+    in property <length> flexible-width;
+    in property <length> horizontal-padding;
+
+    padding-left: root.horizontal-padding;
+    padding-right: root.horizontal-padding;
+    spacing: root.column-spacing;
+
+    HorizontalLayout {
+        width: root.status-width;
+        spacing: 4px;
+
+        // Hidden rather than left out, so the label stays where it is on other rows.
+        TypedInIcon {
+            width: root.icon-width;
+            visible: root.entry.exists && !root.entry.imported;
+        }
+        Text {
+            text: root.entry.label;
+            font-size: 12px;
+            font-italic: true;
+            opacity: 0.7;
+            overflow: elide;
+            vertical-alignment: center;
+        }
+    }
+    Text {
+        width: root.date-width;
+        text: root.entry.date;
+        vertical-alignment: center;
+    }
+    Text {
+        horizontal-stretch: 1;
+        min-width: root.flexible-width;
+        preferred-width: root.flexible-width;
+        text: root.entry.name;
+        overflow: elide;
+        vertical-alignment: center;
+    }
+    Text {
+        horizontal-stretch: 1;
+        min-width: root.flexible-width;
+        preferred-width: root.flexible-width;
+        text: root.entry.category;
+        overflow: elide;
+        vertical-alignment: center;
+    }
+    Text {
+        width: root.amount-width;
+        text: root.entry.amount;
+        color: LineColors.amount(root.entry.kind);
+        horizontal-alignment: right;
+        vertical-alignment: center;
+    }
+}
+
+// One row of an import under review, drawn as a card like the lines of entries: green when
+// it's added, amber when it's linked, faded when it's skipped, and greyed when it's read-only.
+// A row with an entry it's linked to or may be shows that entry on a second line. Column sizes
+// come from the page so lines align with the header.
+export component ReviewLine inherits Rectangle {
+    in property <ReviewRow> review-row;
+    in property <bool> selected;
+    // Every other row is shaded a little differently, under the colour of its decision.
+    in property <bool> odd;
+    in property <length> line-height;
+    in property <length> column-spacing;
+    in property <length> status-width;
+    // Size of the icon of the entry shown with the row.
+    in property <length> icon-width;
+    in property <length> date-width;
+    in property <length> amount-width;
+    // Minimum width of the name and category columns, which share the remaining space.
+    in property <length> flexible-width;
+    // Space between the card's edge and its text; the header uses the same.
+    in property <length> horizontal-padding;
+    // Greyed out and not interactive, e.g. while another row is being edited.
+    in property <bool> dimmed;
+    // Greyed out and its status not clickable, e.g. for rows already in Monies; it can still
+    // be clicked to be selected.
+    in property <bool> read-only;
+
+    callback clicked();
+    callback double-clicked();
+    // The status was clicked, to toggle between adding and skipping.
+    callback status-clicked();
+
+    property <color> missing-color: #e53935;
+    property <bool> linked: root.review-row.status == ReviewStatus.keep-entry
+        || root.review-row.status == ReviewStatus.use-imported;
+    property <color> base: LineColors.line-background(root.odd);
+    // Light enough for the coloured amounts to stay readable on them.
+    property <color> tint: root.dimmed || root.read-only ? root.base
+        : root.review-row.status == ReviewStatus.add ? root.base.mix(#43a047, 0.8)
+        : root.linked ? root.base.mix(#ffb300, 0.86)
+        : root.base;
+
+    background: touch.has-hover ? LineColors.hovered(root.tint) : root.tint;
+    border-radius: 4px;
+    border-width: root.selected ? 2px : 0px;
+    border-color: Palette.accent-background;
+    opacity: root.dimmed ? 0.4 : root.read-only ? 0.45 : root.review-row.status == ReviewStatus.skip ? 0.55 : 1;
+    animate background, opacity { duration: 100ms; }
+
+    // Below the contents, so the status gets its own clicks.
+    touch := TouchArea {
+        enabled: !root.dimmed;
+        clicked => { root.clicked(); }
+        double-clicked => { root.double-clicked(); }
+    }
+
+    VerticalLayout {
+        alignment: center;
+
+        HorizontalLayout {
+            height: root.line-height;
+            padding-left: root.horizontal-padding;
+            padding-right: root.horizontal-padding;
+            spacing: root.column-spacing;
+
+            Rectangle {
+                width: root.status-width;
+
+                Text {
+                    x: 0;
+                    width: parent.width;
+                    text: ReviewTexts.status(root.review-row.status);
+                    color: root.review-row.status == ReviewStatus.pending ? Palette.accent-background : Palette.foreground;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                }
+
+                TouchArea {
+                    enabled: !root.dimmed && !root.read-only;
+                    mouse-cursor: pointer;
+                    clicked => { root.status-clicked(); }
+                }
+            }
+            Text {
+                width: root.date-width;
+                text: root.review-row.date;
+                vertical-alignment: center;
+            }
+            Text {
+                horizontal-stretch: 1;
+                min-width: root.flexible-width;
+                preferred-width: root.flexible-width;
+                text: root.review-row.missing-name ? "Name needed" : root.review-row.name;
+                color: root.review-row.missing-name ? root.missing-color : Palette.foreground;
+                overflow: elide;
+                vertical-alignment: center;
+            }
+            Text {
+                horizontal-stretch: 1;
+                min-width: root.flexible-width;
+                preferred-width: root.flexible-width;
+                text: root.review-row.missing-category ? "Category needed" : root.review-row.category;
+                color: root.review-row.missing-category ? root.missing-color : Palette.foreground;
+                overflow: elide;
+                vertical-alignment: center;
+            }
+            Text {
+                width: root.amount-width;
+                text: root.review-row.amount;
+                color: LineColors.amount(root.review-row.kind);
+                horizontal-alignment: right;
+                vertical-alignment: center;
+            }
+        }
+
+        if root.review-row.has-entry : ReviewEntryLine {
+            height: root.line-height;
+            entry: root.review-row.entry;
+            column-spacing: root.column-spacing;
+            status-width: root.status-width;
+            icon-width: root.icon-width;
+            date-width: root.date-width;
+            amount-width: root.amount-width;
+            flexible-width: root.flexible-width;
+            horizontal-padding: root.horizontal-padding;
+        }
+    }
+}

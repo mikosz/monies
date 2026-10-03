@@ -1,13 +1,16 @@
 import { Button, Palette } from "std-widgets.slint";
 import { ImportLine, PendingImport } from "import-line.slint";
-import { ImportsStore } from "imports-store.slint";
+import { ImportReview } from "import-review.slint";
+import { ImportsStore, ReviewedImport } from "imports-store.slint";
 import { Page } from "page.slint";
+import { ReviewEntry, ReviewRow, ReviewStatus, RowDecision } from "review-line.slint";
 
-export { ImportsStore, PendingImport }
+export { ImportsStore, PendingImport, ReviewedImport, ReviewEntry, ReviewRow, ReviewStatus, RowDecision }
 
 // Bank statements to import, from files in the format of docs/import-format.md. Each
 // statement waits here as a pending import until it's discarded, after confirmation, or
-// reviewed (a later step). The counts tell how its lines match the entries.
+// reviewed and submitted. The counts tell how its lines match the entries. Up/Down select an
+// import; Enter, a double click or its Review button open its review (see `ImportReview`).
 export component ImportPage inherits Page {
     title: "Import";
     description: "";
@@ -20,32 +23,83 @@ export component ImportPage inherits Page {
     property <length> source-width: 100px;
     property <length> created-width: 104px;
     property <length> count-width: 64px;
-    property <length> actions-width: 70px;
+    property <length> actions-width: 150px;
     property <length> line-padding: 8px;
 
     property <bool> confirming: ImportsStore.discarding-id != "";
+    property <bool> reviewing: ImportsStore.review.id != "";
+    // Index of the selected import in the list.
+    property <int> selected: 0;
 
     // The import whose discarding awaits confirmation.
     property <string> discarding-source;
     property <string> discarding-account;
 
-    // Without input fields, the window's undo shortcuts need something focused.
-    init => { keys.focus(); }
+    // Without input fields, the window's undo shortcuts need something focused. The review
+    // focuses itself.
+    init => {
+        if (!root.reviewing) {
+            keys.focus();
+        }
+    }
 
-    function confirm-discard(import: PendingImport) {
-        root.discarding-source = import.source;
-        root.discarding-account = import.account;
-        ImportsStore.discarding-id = import.id;
+    changed reviewing => {
+        if (!self.reviewing) {
+            keys.focus();
+        }
+    }
+
+    function confirm-discard(id: string, source: string, account: string) {
+        root.discarding-source = source;
+        root.discarding-account = account;
+        ImportsStore.discarding-id = id;
     }
 
     function finish-confirmation() {
         ImportsStore.discarding-id = "";
-        keys.focus();
+        // The review takes the keys back itself.
+        if (!root.reviewing) {
+            keys.focus();
+        }
+    }
+
+    function select(index: int) {
+        root.selected = Math.max(0, Math.min(index, ImportsStore.imports.length - 1));
     }
 
     keys := FocusScope {
+        key-pressed(event) => {
+            if (root.reviewing || root.confirming || ImportsStore.imports.length == 0
+                || event.modifiers.control || event.modifiers.alt || event.modifiers.meta) {
+                return reject;
+            }
+            if (event.text == Key.UpArrow) {
+                root.select(root.selected - 1);
+                return accept;
+            }
+            if (event.text == Key.DownArrow) {
+                root.select(root.selected + 1);
+                return accept;
+            }
+            if (event.text == Key.Home) {
+                root.select(0);
+                return accept;
+            }
+            if (event.text == Key.End) {
+                root.select(ImportsStore.imports.length - 1);
+                return accept;
+            }
+            if (event.text == Key.Return) {
+                // The selection may be past the end after an import is gone.
+                root.select(root.selected);
+                ImportsStore.review-import(ImportsStore.imports[root.selected].id);
+                return accept;
+            }
+            return reject;
+        }
+
         // The list is short, so there's no scrolling.
-        VerticalLayout {
+        if !root.reviewing : VerticalLayout {
             alignment: start;
             spacing: 3px;
 
@@ -128,9 +182,10 @@ export component ImportPage inherits Page {
                 }
             }
 
-            for row in ImportsStore.imports : ImportLine {
+            for row[index] in ImportsStore.imports : ImportLine {
                 import: row;
                 dimmed: root.confirming;
+                selected: index == root.selected;
                 column-spacing: root.column-spacing;
                 account-width: root.account-width;
                 source-width: root.source-width;
@@ -138,12 +193,29 @@ export component ImportPage inherits Page {
                 count-width: root.count-width;
                 actions-width: root.actions-width;
                 horizontal-padding: root.line-padding;
+                clicked => {
+                    root.select(index);
+                    keys.focus();
+                }
+                double-clicked => { ImportsStore.review-import(row.id); }
 
+                Button {
+                    text: "Review";
+                    enabled: !root.confirming;
+                    clicked => { ImportsStore.review-import(row.id); }
+                }
                 Button {
                     text: "Discard";
                     enabled: !root.confirming;
-                    clicked => { root.confirm-discard(row); }
+                    clicked => { root.confirm-discard(row.id, row.source, row.account); }
                 }
+            }
+        }
+
+        if root.reviewing : ImportReview {
+            dimmed: root.confirming;
+            discard => {
+                root.confirm-discard(ImportsStore.review.id, ImportsStore.review.source, ImportsStore.review.account);
             }
         }
 

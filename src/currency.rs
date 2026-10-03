@@ -66,22 +66,20 @@ impl Currency {
         DECIMALS.iter().find(|(code, _)| *code == self.code()).map_or(2, |&(_, decimals)| decimals)
     }
 
-    /// Formats minor units of this currency as a decimal amount with its symbol, e.g.
-    /// `€12.50`, `-7800.00 zł` or, for currencies without a known symbol, `12.50 SEK`. A minus
-    /// always comes first.
-    pub fn format_amount(&self, amount: i64) -> String {
+    /// Formats minor units of this currency as a decimal amount with its symbol but without a
+    /// sign, e.g. `€12.50` for both 1250 and -1250, `7800.00 zł` or, for currencies without a
+    /// known symbol, `12.50 SEK`. Amounts are shown coloured by their kind, which tells
+    /// expenses from income instead.
+    pub fn format_magnitude(&self, amount: i64) -> String {
         let number = format_amount(amount, self.decimals());
-        let (sign, number) = match number.strip_prefix('-') {
-            Some(unsigned) => ("-", unsigned),
-            None => ("", number.as_str()),
-        };
+        let number = number.strip_prefix('-').unwrap_or(&number);
         let (symbol, side) = match SYMBOLS.iter().find(|(code, ..)| *code == self.code()) {
             Some(&(_, symbol, side)) => (symbol, side),
             None => (self.code(), Side::After),
         };
         match side {
-            Side::Before => format!("{sign}{symbol}{number}"),
-            Side::After => format!("{sign}{number} {symbol}"),
+            Side::Before => format!("{symbol}{number}"),
+            Side::After => format!("{number} {symbol}"),
         }
     }
 
@@ -131,7 +129,7 @@ mod tests {
 
     #[test]
     fn formats_amounts_with_symbols() {
-        let format = |code, amount| Currency::parse(code).unwrap().format_amount(amount);
+        let format = |code, amount| Currency::parse(code).unwrap().format_magnitude(amount);
         assert_eq!(format("PLN", 240000), "2400.00 zł");
         assert_eq!(format("EUR", 1250), "€12.50");
         assert_eq!(format("USD", 999), "$9.99");
@@ -143,13 +141,16 @@ mod tests {
     }
 
     #[test]
-    fn formats_negative_amounts_with_minus_first() {
-        let format = |code, amount| Currency::parse(code).unwrap().format_amount(amount);
-        assert_eq!(format("EUR", -1250), "-€12.50");
-        assert_eq!(format("PLN", -780000), "-7800.00 zł");
-        assert_eq!(format("SEK", -5), "-0.05 SEK");
-        assert_eq!(format("JPY", -1200), "-¥1200");
+    fn formats_negative_amounts_without_sign() {
+        let format = |code, amount| Currency::parse(code).unwrap().format_magnitude(amount);
+        assert_eq!(format("EUR", -1250), "€12.50");
+        assert_eq!(format("PLN", -780000), "7800.00 zł");
+        assert_eq!(format("SEK", -5), "0.05 SEK");
+        assert_eq!(format("JPY", -1200), "¥1200");
+        assert_eq!(format("KWD", -12500), "12.500 KWD");
         assert_eq!(format("EUR", 0), "€0.00");
+        assert_eq!(format("JPY", 0), "¥0");
+        assert_eq!(format("USD", i64::MIN), "$92233720368547758.08");
     }
 
     #[test]

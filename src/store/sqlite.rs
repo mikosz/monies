@@ -12,7 +12,7 @@ use crate::category::{Categories, CategoryId, CategoryPath};
 use crate::change::{Change, Op};
 use crate::currency::Currency;
 use crate::entry::{Entry, EntryId};
-use crate::import::{Import, ImportId, ImportRow, RowStatus, StatementLine};
+use crate::import::{Import, ImportId, ImportRow, LinkKind, RowStatus, StatementLine};
 use crate::ledger::Ledger;
 
 /// Schema migrations; the database's `user_version` is the number of migrations applied.
@@ -22,8 +22,13 @@ const MIGRATIONS: &[&str] = &[
     // ISO `YYYY-MM-DD` text, currencies ISO 4217 codes, amounts are in minor units of their
     // account's currency (e.g. cents). Deleted accounts are in the trash, restorable.
     // Imported entries keep the bank's statement line in the `statement_` columns, all NULL
-    // for entries typed in. Pending imports are `imports` with their `import_rows` in
-    // statement order; a row's category is a path such as `dogs.health`, NULL when missing.
+    // for entries typed in. A bank's transaction ids, `statement_reference`, are unique per
+    // account; lines without one may repeat. Pending imports are `imports` with their
+    // `import_rows` in statement order; a row's category is a path such as `dogs.health`, NULL
+    // when missing.
+    // A linked row ('keep-entry' or 'use-imported', by what its entry is left with) refers to
+    // its entry by `linked_entry_id`, without a foreign key: the entry may be deleted while the
+    // import is pending, which submitting it then reports.
     // Timestamps are UTC, `YYYY-MM-DD HH:MM:SS.fffffffff+00:00`.
     "CREATE TABLE accounts (
         id       BLOB PRIMARY KEY CHECK (length(id) = 16),
@@ -58,6 +63,8 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX entries_account ON entries(account_id);
     CREATE INDEX entries_date ON entries(date);
     CREATE INDEX entries_category ON entries(category_id);
+    CREATE UNIQUE INDEX entries_reference ON entries(account_id, statement_reference)
+        WHERE statement_reference IS NOT NULL;
 
     CREATE TABLE imports (
         id         BLOB PRIMARY KEY CHECK (length(id) = 16),
@@ -76,8 +83,11 @@ const MIGRATIONS: &[&str] = &[
         reference TEXT,
         name      TEXT NOT NULL,
         category  TEXT CHECK (category <> ''),
-        status    TEXT NOT NULL CHECK (status IN ('pending', 'accepted', 'skipped')),
-        PRIMARY KEY (import_id, position)
+        status    TEXT NOT NULL
+                  CHECK (status IN ('pending', 'accepted', 'skipped', 'keep-entry', 'use-imported')),
+        linked_entry_id BLOB CHECK (length(linked_entry_id) = 16),
+        PRIMARY KEY (import_id, position),
+        CHECK ((status IN ('keep-entry', 'use-imported')) = (linked_entry_id IS NOT NULL))
     );",
 ];
 
@@ -204,12 +214,13 @@ impl SqliteStore {
         // Rows are only ever inserted with their import, so their positions are 0, 1, 2, ...
         let mut rows: BTreeMap<ImportId, Vec<ImportRow>> = BTreeMap::new();
         let mut statement = self.connection.prepare(
-            "SELECT import_id, date, amount, text, reference, name, category, status
+            "SELECT import_id, date, amount, text, reference, name, category, status, linked_entry_id
              FROM import_rows ORDER BY import_id, position",
         )?;
         let loaded = statement.query_map([], |row| {
             let line = StatementLine { date: row.get(1)?, amount: row.get(2)?, text: row.get(3)?, reference: row.get(4)? };
-            let import_row = ImportRow { line, name: row.get(5)?, category: row.get(6)?, status: row.get(7)? };
+            let status = row_status(row.get_ref(7)?, row.get::<_, Option<_>>(8)?.map(EntryId))?;
+            let import_row = ImportRow { line, name: row.get(5)?, category: row.get(6)?, status };
             Ok((ImportId(row.get(0)?), import_row))
         })?;
         for row in loaded {
@@ -333,9 +344,11 @@ fn apply_op(transaction: &Transaction, op: &Op) -> Result<(), StorageError> {
                 params![id.0, import.account.0, import.created, import.source],
             )?;
             for (position, row) in import.rows.iter().enumerate() {
+                let (status, linked) = status_columns(row.status);
                 transaction.execute(
-                    "INSERT INTO import_rows (import_id, position, date, amount, text, reference, name, category, status)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    "INSERT INTO import_rows (import_id, position, date, amount, text, reference, name, category, status,
+                         linked_entry_id)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                     params![
                         id.0,
                         position as i64,
@@ -345,7 +358,8 @@ fn apply_op(transaction: &Transaction, op: &Op) -> Result<(), StorageError> {
                         row.line.reference,
                         row.name,
                         row.category,
-                        row.status,
+                        status,
+                        linked.map(|entry| entry.0),
                     ],
                 )?;
             }
@@ -361,9 +375,10 @@ fn apply_op(transaction: &Transaction, op: &Op) -> Result<(), StorageError> {
             }
         }
         Op::UpdateImportRow { id, position, after, .. } => {
+            let (status, linked) = status_columns(after.status);
             let updated = transaction.execute(
                 "UPDATE import_rows SET date = ?3, amount = ?4, text = ?5, reference = ?6, name = ?7, category = ?8,
-                     status = ?9
+                     status = ?9, linked_entry_id = ?10
                  WHERE import_id = ?1 AND position = ?2",
                 params![
                     id.0,
@@ -374,7 +389,8 @@ fn apply_op(transaction: &Transaction, op: &Op) -> Result<(), StorageError> {
                     after.line.reference,
                     after.name,
                     after.category,
-                    after.status,
+                    status,
+                    linked.map(|entry| entry.0),
                 ],
             )?;
             if updated != 1 {
@@ -413,26 +429,28 @@ impl FromSql for CategoryPath {
     }
 }
 
-/// Row statuses are stored as lowercase text.
-impl ToSql for RowStatus {
-    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
-        let status = match self {
-            RowStatus::Pending => "pending",
-            RowStatus::Accepted => "accepted",
-            RowStatus::Skipped => "skipped",
-        };
-        Ok(status.into())
+/// Row statuses are stored as lowercase text, a linked row's by its kind of link and its entry
+/// in a column of its own.
+fn status_columns(status: RowStatus) -> (&'static str, Option<EntryId>) {
+    match status {
+        RowStatus::Pending => ("pending", None),
+        RowStatus::Accepted => ("accepted", None),
+        RowStatus::Skipped => ("skipped", None),
+        RowStatus::Linked(entry, LinkKind::KeepEntry) => ("keep-entry", Some(entry)),
+        RowStatus::Linked(entry, LinkKind::UseImported) => ("use-imported", Some(entry)),
     }
 }
 
-impl FromSql for RowStatus {
-    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
-        match value.as_str()? {
-            "pending" => Ok(RowStatus::Pending),
-            "accepted" => Ok(RowStatus::Accepted),
-            "skipped" => Ok(RowStatus::Skipped),
-            status => Err(FromSqlError::Other(format!("invalid import row status {status:?}").into())),
-        }
+/// The status stored by [`status_columns`].
+fn row_status(status: ValueRef<'_>, linked: Option<EntryId>) -> rusqlite::Result<RowStatus> {
+    let text = status.as_str()?;
+    match (text, linked) {
+        ("pending", None) => Ok(RowStatus::Pending),
+        ("accepted", None) => Ok(RowStatus::Accepted),
+        ("skipped", None) => Ok(RowStatus::Skipped),
+        ("keep-entry", Some(entry)) => Ok(RowStatus::Linked(entry, LinkKind::KeepEntry)),
+        ("use-imported", Some(entry)) => Ok(RowStatus::Linked(entry, LinkKind::UseImported)),
+        _ => Err(FromSqlError::Other(format!("invalid import row status {text:?}").into()).into()),
     }
 }
 
@@ -585,7 +603,7 @@ mod tests {
         let (id, current) = ledger.entries()[0].clone();
 
         let parsed = ParsedEntry::test(account, "2026-10-02", "Flat", "bills.rent", "2");
-        let change = perform(&mut ledger, &mut store, |builder| builder.update_entry(id, &current, parsed)).unwrap();
+        let change = perform(&mut ledger, &mut store, |builder| builder.update_entry(id, &current, parsed).unwrap()).unwrap();
         assert_eq!(store.load().unwrap().entries(), ledger.entries());
         assert_eq!(ledger.entry(id).unwrap().name, "Flat");
 
@@ -603,7 +621,7 @@ mod tests {
         let (id, current) = ledger.entries()[0].clone();
 
         let parsed = ParsedEntry::test(bank, "2026-10-01", "Rent", "bills", "1");
-        let change = perform(&mut ledger, &mut store, |builder| builder.update_entry(id, &current, parsed)).unwrap();
+        let change = perform(&mut ledger, &mut store, |builder| builder.update_entry(id, &current, parsed).unwrap()).unwrap();
         let loaded = store.load().unwrap();
         assert_eq!(loaded.entries(), ledger.entries());
         assert_eq!(loaded.entry(id).unwrap().account, bank);
@@ -623,7 +641,7 @@ mod tests {
 
         let mut builder = ChangeBuilder::new("Edit", &ledger);
         let parsed = ParsedEntry::test(account, "2026-10-01", "Flat", "bills", "1");
-        builder.update_entry(id, &current, parsed);
+        builder.update_entry(id, &current, parsed).unwrap();
         assert!(matches!(store.apply(&builder.build()), Err(StorageError::MissingRow { table: "entries" })));
     }
 
@@ -727,14 +745,15 @@ mod tests {
         }
     }
 
-    /// Rows of an import, one with a reference and one with a missing category.
+    /// Rows of an import that can be submitted, one with a reference and one with a missing
+    /// category.
     fn import_rows() -> Vec<ImportRow> {
         let mut groceries = ImportRow::test("2026-09-30", 1250, "CARD PAYMENT CORNER SHOP 0042", "Groceries", "food.shop", RowStatus::Accepted);
         groceries.line.reference = Some("TX-0001".to_owned());
         vec![
             groceries,
             ImportRow::test("2026-09-30", -240000, "SALARY FICTIONAL LTD", "Salary", "income", RowStatus::Accepted),
-            ImportRow::test("2026-10-01", 500, "CARD PAYMENT BAKERY 0007", "", "", RowStatus::Pending),
+            ImportRow::test("2026-10-01", 500, "CARD PAYMENT BAKERY 0007", "", "", RowStatus::Skipped),
             ImportRow::test("2026-10-01", 9, "BANK FEE", "Fee", "bills", RowStatus::Skipped),
         ]
     }
@@ -793,7 +812,7 @@ mod tests {
 
         let (entry_id, current) = ledger.entries()[1].clone();
         let parsed = ParsedEntry::test(account, "2026-10-02", "Shopping", "food", "13");
-        perform(&mut ledger, &mut store, |builder| builder.update_entry(entry_id, &current, parsed)).unwrap();
+        perform(&mut ledger, &mut store, |builder| builder.update_entry(entry_id, &current, parsed).unwrap()).unwrap();
         let loaded = store.load().unwrap();
         assert_eq!(loaded.entries(), ledger.entries());
         assert_eq!(loaded.entry(entry_id).unwrap().statement, current.statement, "editing keeps the statement line");
@@ -814,6 +833,54 @@ mod tests {
         ledger.apply(&mut store, &submit.inverse()).unwrap();
         assert_eq!((count(&store, "entries"), count(&store, "categories")), (0, 0));
         assert_eq!(imports(&store.load().unwrap()), pending, "with its row statuses");
+    }
+
+    #[test]
+    fn saves_and_submits_linked_rows_and_back() {
+        let (mut store, mut ledger, account) = with_account();
+        add(&mut ledger, &mut store, account, &[("2026-09-29", "Groceries", "food", "12.50"), ("2026-10-02", "Fees", "food", "0.09")])
+            .unwrap();
+        let entries = ledger.entries().to_vec();
+        let (kept, used) = (entries[0].0, entries[1].0);
+        let rows = vec![
+            ImportRow::test("2026-09-30", 1250, "CARD PAYMENT CORNER SHOP 0042", "", "", RowStatus::Pending),
+            ImportRow::test("2026-10-01", 9, "BANK FEE", "Fee", "bills", RowStatus::Pending),
+        ];
+        let mut id = None;
+        perform(&mut ledger, &mut store, |builder| id = Some(builder.add_import(account, "statement-2026-09.csv", rows.clone())))
+            .unwrap();
+        let id = id.unwrap();
+        assert_eq!(imports(&store.load().unwrap()), imports(&ledger));
+
+        let keep = ImportRow { status: RowStatus::Linked(kept, LinkKind::KeepEntry), ..rows[0].clone() };
+        let use_imported = ImportRow { status: RowStatus::Linked(used, LinkKind::UseImported), ..rows[1].clone() };
+        perform(&mut ledger, &mut store, |builder| {
+            builder.update_import_row(id, 0, keep);
+            builder.update_import_row(id, 1, use_imported);
+        })
+        .unwrap();
+        let loaded = store.load().unwrap();
+        assert_eq!(imports(&loaded), imports(&ledger));
+        let statuses: Vec<RowStatus> = loaded.import(id).unwrap().rows.iter().map(|row| row.status).collect();
+        assert_eq!(statuses, [RowStatus::Linked(kept, LinkKind::KeepEntry), RowStatus::Linked(used, LinkKind::UseImported)]);
+
+        let submit = perform(&mut ledger, &mut store, |builder| {
+            builder.submit_import(id).unwrap();
+        })
+        .unwrap();
+        let loaded = store.load().unwrap();
+        assert_eq!(loaded.entries(), ledger.entries());
+        assert_eq!(loaded.entry(kept).unwrap().statement.as_ref(), Some(&rows[0].line));
+        let updated = loaded.entry(used).unwrap();
+        assert_eq!((updated.name.as_str(), loaded.categories().path(updated.category)), ("Fee", "bills".to_owned()));
+        assert_eq!((updated.amount, updated.statement.as_ref()), (9, Some(&rows[1].line)));
+        assert_eq!((count(&store, "entries"), count(&store, "imports")), (2, 0));
+
+        ledger.apply(&mut store, &submit.inverse()).unwrap();
+        let loaded = store.load().unwrap();
+        assert_eq!(loaded.entries(), entries, "undo restores the entries");
+        assert_eq!(count(&store, "categories"), 1, "and removes the category created");
+        assert_eq!(imports(&loaded), imports(&ledger));
     }
 
     #[test]
@@ -867,6 +934,27 @@ mod tests {
     }
 
     #[test]
+    fn references_are_unique_per_account() {
+        let (mut store, mut ledger, cash) = with_account();
+        let bank = add_account(&mut ledger, &mut store, "Bank", "PLN");
+        let bills = Uuid::now_v7();
+        store.connection.execute("INSERT INTO categories (id, name) VALUES (?1, 'bills')", params![bills]).unwrap();
+        let insert = |account: AccountId, reference: Option<&str>| {
+            store.connection.execute(
+                "INSERT INTO entries (id, account_id, date, name, category_id, amount,
+                     statement_date, statement_amount, statement_text, statement_reference)
+                 VALUES (?1, ?2, '2026-10-01', 'x', ?3, 1, '2026-10-01', 1, 'BANK FEE', ?4)",
+                params![Uuid::now_v7(), account.0, bills, reference],
+            )
+        };
+        assert!(insert(cash, Some("TX-0001")).is_ok());
+        assert!(insert(cash, Some("TX-0001")).is_err(), "the same account");
+        assert!(insert(bank, Some("TX-0001")).is_ok(), "another account");
+        assert!(insert(cash, None).is_ok());
+        assert!(insert(cash, None).is_ok(), "lines without a reference may repeat");
+    }
+
+    #[test]
     fn rejects_invalid_imports() {
         let (store, ..) = with_account();
         let account = store.load().unwrap().accounts().iter().next().unwrap().0;
@@ -900,5 +988,35 @@ mod tests {
         assert!(row(3, "2026-02-30", None, "pending").is_err(), "date");
         assert!(row(3, "2026-10-01", Some(""), "pending").is_err(), "category");
         assert!(row(-1, "2026-10-01", None, "pending").is_err(), "position");
+    }
+
+    #[test]
+    fn rejects_linked_rows_without_entry_and_entries_of_unlinked_rows() {
+        let (store, ..) = with_account();
+        let account = store.load().unwrap().accounts().iter().next().unwrap().0;
+        let id = Uuid::now_v7();
+        store
+            .connection
+            .execute(
+                "INSERT INTO imports (id, account_id, created, source) VALUES (?1, ?2, '2026-10-01 12:30:00+00:00', 'Claude')",
+                params![id, account.0],
+            )
+            .unwrap();
+        let row = |position: i64, status: &str, linked: Option<&[u8]>| {
+            store.connection.execute(
+                "INSERT INTO import_rows (import_id, position, date, amount, text, name, status, linked_entry_id)
+                 VALUES (?1, ?2, '2026-10-01', 1, 'BANK FEE', '', ?3, ?4)",
+                params![id, position, status, linked],
+            )
+        };
+        let entry = Uuid::now_v7();
+        assert!(row(0, "keep-entry", Some(entry.as_bytes())).is_ok());
+        assert!(row(1, "use-imported", Some(entry.as_bytes())).is_ok());
+        assert!(row(2, "pending", None).is_ok());
+        assert!(row(3, "keep-entry", None).is_err(), "a linked row needs its entry");
+        assert!(row(3, "use-imported", None).is_err(), "a linked row needs its entry");
+        assert!(row(3, "accepted", Some(entry.as_bytes())).is_err(), "only linked rows have an entry");
+        assert!(row(3, "keep-entry", Some(&[1, 2, 3])).is_err(), "entry ids are 16 bytes");
+        assert!(row(3, "linked", Some(entry.as_bytes())).is_err(), "status");
     }
 }
